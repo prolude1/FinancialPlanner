@@ -1,0 +1,97 @@
+name: financial-planner
+x-backend: &backend
+  image: financial-planner-backend:local
+  build:
+    context: .
+    dockerfile: backend/Dockerfile
+  environment: &environment
+    DATABASE_URL: postgresql+psycopg://planner:${POSTGRES_PASSWORD:?Run python3 scripts/configure.py}@db:5432/planner
+    APP_TIMEZONE: ${APP_TIMEZONE:-Asia/Singapore}
+    WEB_ORIGIN: http://localhost:${WEB_PORT:-8080}
+  restart: unless-stopped
+  init: true
+  security_opt:
+    - no-new-privileges:true
+
+services:
+  db:
+    image: postgres:17.4-alpine
+    environment:
+      POSTGRES_USER: planner
+      POSTGRES_DB: planner
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Run python3 scripts/configure.py}
+    volumes:
+      - planner-data:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U planner -d planner"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+  migrate:
+    <<: *backend
+    command: [python, -m, app.core.store]
+    restart: "no"
+    depends_on:
+      db:
+        condition: service_healthy
+  api:
+    <<: *backend
+    volumes:
+      - planner-import-rollback:/data
+    environment:
+      <<: *environment
+      SESSION_SECRET: ${SESSION_SECRET:?Run python3 scripts/configure.py}
+      WEB_PASSWORD_HASH: ${WEB_PASSWORD_HASH:?Run python3 scripts/configure.py}
+      BOT_API_SECRET: ${BOT_API_SECRET:?Run python3 scripts/configure.py}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+  bot:
+    <<: *backend
+    environment:
+      <<: *environment
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_OWNER_ID: ${TELEGRAM_OWNER_ID:-}
+      BOT_API_SECRET: ${BOT_API_SECRET:?Run python3 scripts/configure.py}
+    command: [python, -m, app.telegram_bot]
+    depends_on:
+      api:
+        condition: service_healthy
+  worker:
+    <<: *backend
+    environment:
+      <<: *environment
+      MARKET_POLL_SECONDS: ${MARKET_POLL_SECONDS:-900}
+      CATALOG_REFRESH_SECONDS: ${CATALOG_REFRESH_SECONDS:-86400}
+      HISTORY_REFRESH_SECONDS: ${HISTORY_REFRESH_SECONDS:-21600}
+      STOCK_PRICE_PROVIDER: ${STOCK_PRICE_PROVIDER:-yahoo}
+    command: [python, -m, app.core.worker]
+    depends_on:
+      api:
+        condition: service_healthy
+  web:
+    image: financial-planner-web:local
+    build: ./web
+    ports:
+      - "127.0.0.1:${WEB_PORT:-8080}:8080"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:8080/health]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  planner-data:
+  planner-import-rollback:

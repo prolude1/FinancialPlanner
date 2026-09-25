@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#123b35"><title>Ledger · Personal finance</title>
+  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/data-management.css">
+  <link rel="stylesheet" href="/calculator.css">
+  <link rel="stylesheet" href="/stocks.css">
+  <script src="/data-management.js" defer></script>
+  <script src="/stocks.js" defer></script>
+  <script src="/calculator.js" defer></script>
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <section id="login" class="login-wrap" hidden>
+    <form id="login-form" class="login-card">
+      <div class="brand-mark">L</div><p class="eyebrow">YOUR PERSONAL FINANCES</p>
+      <h1>A clearer view<br>of what you own.</h1><p class="muted">Sign in to your local financial dashboard.</p>
+      <label>Dashboard password<input name="password" type="password" autocomplete="current-password" required></label>
+      <button type="submit">Open my dashboard <span>↗</span></button>
+      <p id="login-error" class="error" role="alert"></p><small>Runs on your laptop. Your records stay in your database.</small>
+    </form>
+  </section>
+  <div id="shell" hidden>
+    <aside class="sidebar">
+      <a class="brand" href="#overview"><span class="brand-mark">L</span> ledger<span class="brand-dot">.</span></a>
+      <p class="sidebar-caption">PERSONAL WORKSPACE</p>
+      <nav aria-label="Main navigation">
+        <a href="#overview" data-nav="overview"><span>◫</span> Overview</a>
+        <a href="#accounts" data-nav="accounts"><span>▤</span> Accounts</a>
+        <a href="#stocks" data-nav="stocks"><span>⌁</span> Stocks</a>
+        <a href="#credit-cards" data-nav="credit-cards"><span>▱</span> Credit cards</a>
+        <a href="#loans" data-nav="loans"><span>↗</span> Loans</a>
+        <a href="#calculator" data-nav="calculator"><span>∿</span> Calculator</a>
+        <a href="#data-management" data-nav="data-management"><span>⇅</span> Data management</a>
+        <a href="#activity" data-nav="activity"><span>≋</span> Activity</a>
+      </nav>
+      <div class="sidebar-bottom"><div class="local-label"><span class="dot"></span> Local workspace</div><p>Record asset changes with your private Telegram bot.</p><button id="logout" class="text-button">Sign out ↗</button></div>
+    </aside>
+    <main>
+      <header class="topbar"><span>Personal finance <span class="breadcrumb">/ <span id="crumb">Overview</span></span></span><span id="connection" role="status">Connecting…</span></header>
+      <div class="page">
+        <div class="page-heading"><div><p class="eyebrow" id="page-eyebrow">THE BIG PICTURE</p><h1 id="page-title">Your financial overview</h1><p class="muted" id="page-subtitle">Every account. One place.</p></div><div class="date-pill" id="today"></div></div>
+        <div id="notice" role="status"></div>
+        <div id="content"></div>
+        <footer>SGD reporting currency <span>·</span> Investment values use completed-session closes <span>·</span> Property values excluded</footer>
+      </div>
+    </main>
+  </div>
+  <dialog id="modal"><div class="modal-head"><h2 id="modal-title"></h2><button id="close-modal" class="icon-button" aria-label="Close dialog">×</button></div><div id="modal-body"></div></dialog>
+  <div id="toast" role="status" hidden></div>
+</body>
+</html>
