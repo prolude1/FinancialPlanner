@@ -24,7 +24,7 @@ Commands start guided conversations with field prompts. Use /accounts to find ac
 | `/account_rename` | Change an active account's nickname without changing its reference or history |
 | `/account` | Open account actions: list, view, add, rename, archive, cash movements, transfers, and CPF reconciliation |
 | `/creditcard` | Open credit-card actions: list, add, reconcile, purchase, refund, and payment |
-| `/account_archive` | Archive an empty account after confirmation; history remains viewable |
+| `/account_archive` | Archive an empty account after confirmation; the audit history is retained |
 | `/opening_cash` | Account, currency, amount, opening date |
 | `/opening_holding` | Brokerage, instrument/exchange, equity or ETF, quantity, currency, opening date, optional known unit cost |
 | `/deposit` | Account, amount, currency, date |
@@ -35,9 +35,6 @@ Commands start guided conversations with field prompts. Use /accounts to find ac
 | `/cpf_set` | CPF account, actual balance, effective date; records a reconciliation adjustment |
 | `/split` | Brokerage, instrument, new shares per old share, effective date; quantity adjustment only |
 | `/account ACCOUNT_ID` | Show cash and holdings for a specific account |
-| `/history` | Recent transactions, with transaction references (latest 25 entries in Telegram) |
-| `/correct` | Select transaction, enter corrected fields, review changes, confirm |
-| `/void` | Select an incorrect transaction and cancel its effect after confirmation |
 | `/help` | Show supported commands |
 
 The Telegram command list keeps account administration under `/account` and less frequent card actions under `/creditcard`. Frequently used actions—`/deposit`, `/withdraw`, `/transfer`, `/cpf_set`, `/purchase`, and `/payment`—appear directly in the main command menu. `/purchase` records a credit-card purchase and `/payment` pays a credit-card balance from a cash account. Whenever a workflow asks for an account, credit-card account, or individual card, tap its name instead of copying an ID. For a purchase, every card appears in one combined list with its card-account group, so no separate group choice is required. The ID remains visible in text as a fallback. Completed operations show **Yes, save** and **No, cancel** buttons; `/confirm` and `/cancel` still work if you prefer typing.
@@ -72,11 +69,11 @@ Create OA, SA, and Medisave as three CPF accounts. Use deposits or withdrawals f
 
 The UI always identifies CPF as manually maintained. A warning appears one calendar month after the latest reconciliation or opening balance. Ordinary deposits and withdrawals do not imply that the account has been reconciled against a statement. The warning never blocks updates.
 
-### Corrections
+### Transaction history and edits
 
-Use `/correct` for a mistaken amount, quantity, price, date, or account. Use `/void` when the transaction should not exist. The previous version remains in the audit trail.
+Use the local web app's Activity page to review transaction history. Telegram is for recording new transactions. General transaction correction and cancellation controls are moving to the web app; until those controls are available, the retired `/history`, `/correct`, and `/void` commands point you to the web app and make no change. Loan repayment corrections are already available from the Loans page.
 
-Changing old transactions can affect later ones. If a correction would leave insufficient cash for a later buy or insufficient shares for a later sale, the bot explains the conflict instead of silently creating invalid balances. Posted transactions cannot be erased by archiving an account.
+The backend retains original entries and audit links when an edit or cancellation is made. Posted transactions cannot be erased by archiving an account.
 
 ## Local dashboard
 
@@ -98,7 +95,7 @@ Credit cards are maintained in SGD. A credit-card account represents one combine
 
 `/credit_purchase` increases the outstanding balance and records activity against the selected card. `/credit_refund` records a card credit, reducing the balance and that card's activity total. `/credit_payment` reduces the balance and deducts the entered amount from a selected non-CPF account's SGD cash balance. The payment is rejected if that funding account lacks sufficient SGD cash.
 
-The combined outstanding balance is calculated from recorded purchases minus refunds and payments. Payments are not allocated among cards. A combined balance below zero is allowed and appears as an account credit rather than a liability. Use `/correct` or `/void` with a transaction reference to fix card events while retaining history.
+The combined outstanding balance is calculated from recorded purchases minus refunds and payments. Payments are not allocated among cards. A combined balance below zero is allowed and appears as an account credit rather than a liability. Review card transactions in the web app's Activity page.
 
 ## Loans on the web
 
@@ -116,7 +113,7 @@ The initial rule is same-currency funding: convert or transfer cash first if a r
 - Internet unavailable: cached balances and prices remain readable locally; Telegram and price refresh cannot work.
 - Price provider delayed: retain the last valid completed-session data and show its date.
 - Database unavailable: reject writes and show an error; do not claim a transaction was recorded.
-- Bot confirmation interrupted: check `/history` before trying again. Duplicate delivery of the same update is automatically ignored.
+- Bot confirmation interrupted: check the Activity page before trying again. Duplicate delivery of the same update is automatically ignored.
 
 ## HDB opening balances and corrections
 

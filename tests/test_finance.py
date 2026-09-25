@@ -2,8 +2,8 @@ from decimal import Decimal, localcontext
 
 import pytest
 
-from app.domain import Invalid
-from app.finance import time_value
+from app.core.domain import Invalid
+from app.core.finance import time_value
 
 
 def request(**changes):

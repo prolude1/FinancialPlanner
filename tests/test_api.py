@@ -1,6 +1,7 @@
 import hashlib
 import os
 import uuid
+import warnings
 from copy import deepcopy
 from unittest.mock import Mock
 import pytest
@@ -8,7 +9,12 @@ import pytest
 os.environ.setdefault("SESSION_SECRET", "test-session-secret-" * 3)
 os.environ.setdefault("BOT_API_SECRET", "test-bot-secret")
 os.environ.setdefault("WEB_PASSWORD_HASH", "00" * 16 + ":" + hashlib.pbkdf2_hmac("sha256", b"test-password", bytes(16), 600000).hex())
-from fastapi.testclient import TestClient
+with warnings.catch_warnings(record=True) as testclient_import_warnings:
+    warnings.simplefilter("always")
+    from fastapi.testclient import TestClient
+assert not any("Using httpx with starlette.testclient is deprecated" in str(warning.message)
+               for warning in testclient_import_warnings), \
+    "Starlette TestClient must use the pinned httpx2 adapter"
 from app.core import store
 from app.api_server import main as api
 from app.telegram_bot import handlers as bot
@@ -26,15 +32,75 @@ def client():
 
 def test_authentication_csrf_and_bot_scope(client):
     assert client.get("/api/dashboard").status_code == 401
+    assert client.get("/api/cashflow").status_code == 401
     assert client.post("/api/login", json={"password": "test-password"}).status_code == 403
     r = client.post("/api/login", json={"password": "test-password"}, headers={"Origin": "http://localhost:8080"})
     assert r.status_code == 200
     assert "httponly" in r.headers["set-cookie"].lower()
     assert client.get("/api/dashboard").status_code == 200
+    cashflow = client.get("/api/cashflow")
+    assert cashflow.status_code == 200
+    assert cashflow.json()["selection"]["type"] == "last_12_months"
+    year = client.get("/api/cashflow?year=2025")
+    assert year.status_code == 200
+    assert year.json()["selection"]["start_month"] == "2025-01"
+    assert year.json()["selection"]["end_month"] == "2025-12"
+    assert not year.json()["selection"]["current_month_partial"]
+    assert client.get("/api/cashflow?year=9999").status_code == 422
     assert client.post("/api/commands/account_add", json={}).status_code == 403
     headers = {"Origin": "http://localhost:8080", "X-CSRF-Token": r.json()["csrf"], "Idempotency-Key": "new"}
     assert client.post("/api/commands/account_add", json={"name": "Bank", "type": "bank", "currency": "SGD"}, headers=headers).status_code == 200
     assert client.post("/api/commands/loan_add", json={}, headers={"Authorization": "Bearer test-bot-secret", "Idempotency-Key": "loan"}).status_code == 422
+
+
+def test_web_transaction_history_exposes_audit_edit_contract_and_conflicts(client):
+    login = client.post("/api/login", json={"password": "test-password"},
+                        headers={"Origin": "http://localhost:8080"})
+    headers = {"Origin": "http://localhost:8080", "X-CSRF-Token": login.json()["csrf"],
+               "Idempotency-Key": "history-create-account"}
+    account = client.post("/api/commands/account_add", headers=headers,
+                          json={"name": "Activity bank", "type": "bank", "currency": "SGD"}).json()
+    headers["Idempotency-Key"] = "history-deposit"
+    original = client.post("/api/commands/deposit", headers=headers,
+                           json={"account": account["id"], "currency": "SGD", "amount": "25.0000000000",
+                                 "description": "Salary", "date": "2026-01-02"}).json()
+    row = next(entry for entry in client.get("/api/dashboard").json()["history"] if entry["id"] == original["id"])
+    assert row["status"] == "active" and row["data"]["amount"] == "25.0000000000"
+    assert row["can_edit"] and row["can_void"] and "amount" in row["editable_fields"]
+    headers["Idempotency-Key"] = "history-correction"
+    corrected = client.post("/api/commands/correct", headers=headers,
+                            json={"transaction": original["id"], "changes": {"amount": "30.0000000000"}})
+    assert corrected.status_code == 200 and corrected.json()["replaces"] == original["id"]
+    history = client.get("/api/dashboard").json()["history"]
+    old = next(entry for entry in history if entry["id"] == original["id"])
+    assert old["status"] == "superseded" and old["replaced_by"] == corrected.json()["id"]
+    assert not old["can_edit"] and not old["editable_fields"]
+    headers["Idempotency-Key"] = "history-stale-void"
+    stale = client.post("/api/commands/void", headers=headers, json={"transaction": original["id"]})
+    assert stale.status_code == 409 and "refresh history" in stale.json()["detail"]
+    headers["Idempotency-Key"] = "history-void-current"
+    voided = client.post("/api/commands/void", headers=headers,
+                         json={"transaction": corrected.json()["id"]})
+    assert voided.status_code == 200 and voided.json() == {"id": corrected.json()["id"], "status": "void"}
+
+
+def test_bot_cannot_use_shared_correction_or_void_commands(client):
+    headers = {"Authorization": "Bearer test-bot-secret", "Idempotency-Key": "bot-history-account"}
+    account = client.post("/api/commands/account_add", headers=headers,
+                          json={"name": "Bot bank", "type": "bank", "currency": "SGD"}).json()
+    headers["Idempotency-Key"] = "bot-history-deposit"
+    event = client.post("/api/commands/deposit", headers=headers,
+                        json={"account": account["id"], "currency": "SGD", "amount": "10.00",
+                              "date": "2026-01-01"}).json()
+    history = client.get("/api/dashboard", headers={"Authorization": "Bearer test-bot-secret"}).json()["history"]
+    assert not next(row for row in history if row["id"] == event["id"])["can_edit"]
+    headers["Idempotency-Key"] = "bot-history-correct"
+    corrected = client.post("/api/commands/correct", headers=headers,
+                            json={"transaction": event["id"], "changes": {"amount": "20.00"}})
+    assert corrected.status_code == 422 and "local web UI" in corrected.json()["detail"]
+    headers["Idempotency-Key"] = "bot-history-void"
+    voided = client.post("/api/commands/void", headers=headers, json={"transaction": event["id"]})
+    assert voided.status_code == 422 and "local web UI" in voided.json()["detail"]
 
 
 def test_api_rolls_back_failed_transaction(client):
@@ -296,11 +362,45 @@ def test_trade_accepts_exchange_colon_ticker_shortcut(client):
 def test_telegram_command_menu_keeps_top_level_choices_compact():
     commands = bot.telegram_commands()
     names = {item["command"] for item in commands}
-    assert {"start", "help", "account", "creditcard", "history", "deposit", "withdraw",
+    assert {"start", "help", "account", "creditcard", "deposit", "withdraw",
             "transfer", "cpf_set", "purchase", "payment", "buy", "sell", "opening_holding",
-            "split", "correct", "void", "cancel", "calculator", "stock"} == names
+            "split", "cancel", "calculator", "stock"} == names
     assert not ({"account_add", "credit_purchase", "confirm"} & names)
+    assert not ({"history", "correct", "void"} & names)
     assert len(names) == len(commands)
+
+
+def test_retired_telegram_history_and_edit_commands_redirect_without_mutation(client):
+    owner = 918
+    update = lambda uid, text: {"update_id": uid, "message": {"from": {"id": owner},
+        "chat": {"id": owner, "type": "private"}, "text": text}}
+    mutated = []
+    mutate = lambda *args: mutated.append(args)
+
+    for uid, command in enumerate(("/history", "/correct", "/void"), 880):
+        reply = bot.handle(update(uid, command), owner, lambda: pytest.fail("must not query history"), mutate)
+        assert "web app" in reply and "No changes were made" in reply
+    assert mutated == []
+
+    for uid, legacy_command in ((883, "correct"), (884, "void")):
+        with store.transaction() as state:
+            state["bot"]["session"] = {"command": legacy_command, "data": {"transaction": "deadbeef01"},
+                                        "index": 1, "started": 9999999999}
+            state["bot"]["offset"] = uid
+        reply = bot.handle(update(uid, "amount"), owner, lambda: pytest.fail("must not query history"), mutate)
+        assert "older Telegram edit was cancelled" in reply
+        assert store.read()["bot"]["session"] is None
+    assert mutated == []
+
+
+def test_help_text_omits_retired_transaction_commands(client):
+    owner = 917
+    update = lambda uid, text: {"update_id": uid, "message": {"from": {"id": owner},
+        "chat": {"id": owner, "type": "private"}, "text": text}}
+    for uid, command in ((870, "/help"), (871, "/start")):
+        reply = bot.handle(update(uid, command), owner, lambda: {}, lambda *_: {})
+        assert "View or edit transactions in the local web app" in reply
+        assert "/history" not in reply and "/correct" not in reply and "/void" not in reply
 
 
 def test_account_menu_and_selection_use_inline_buttons(client):

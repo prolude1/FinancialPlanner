@@ -3,8 +3,9 @@ from datetime import date
 from decimal import Decimal
 import uuid
 import pytest
-from app.domain import apply, empty, replay, credit_replay, Invalid, loan_balance, loan_view
-from app.views import dashboard
+from app.core.domain import (apply, empty, replay, credit_replay, Invalid, TransactionConflict,
+                             loan_balance, loan_view)
+from app.core.views import dashboard, cashflow_summary
 
 TODAY = date(2026, 9, 22)
 
@@ -50,7 +51,7 @@ def test_atomic_rejection_and_backdated_correction():
     command(s, "buy", trade(a, quantity="9"))
     before = deepcopy(s)
     with pytest.raises(Invalid, match="Insufficient"):
-        command(s, "correct", {"transaction": opening["id"], "changes": {"amount": "500"}})
+        command(s, "correct", {"transaction": opening["id"], "changes": {"amount": "500"}}, "web")
     assert s == before
     with pytest.raises(Invalid, match="Insufficient"):
         command(s, "sell", trade(a, quantity="10"))
@@ -96,7 +97,7 @@ def test_cpf_targets_replay_and_month_boundary():
     assert dashboard(s, TODAY)["accounts"][0]["cpf_stale"]
     e = command(s, "cpf_set", {"account": a, "amount": "20500", "date": "2026-09-21"})
     assert replay(s, TODAY)[4][e["id"]] == "500"
-    command(s, "correct", {"transaction": opening["id"], "changes": {"amount": "19000"}})
+    command(s, "correct", {"transaction": opening["id"], "changes": {"amount": "19000"}}, "web")
     assert replay(s, TODAY)[0][a, "SGD"] == 20500
     assert replay(s, TODAY)[4][e["id"]] == "1500"
     assert not dashboard(s, TODAY)["accounts"][0]["cpf_stale"]
@@ -105,12 +106,104 @@ def test_cpf_targets_replay_and_month_boundary():
 def test_cancellation_preserves_audit():
     s = empty(); a = account(s); cash(s, a)
     buy = command(s, "buy", trade(a))
-    corrected = command(s, "correct", {"transaction": buy["id"], "changes": {"quantity": "3"}})
+    corrected = command(s, "correct", {"transaction": buy["id"], "changes": {"quantity": "3"}}, "web")
     assert corrected["replaces"] == buy["id"]
     assert s["events"][1]["status"] == "superseded"
-    command(s, "void", {"transaction": corrected["id"]})
+    command(s, "void", {"transaction": corrected["id"]}, "web")
     assert replay(s, TODAY)[0][a, "USD"] == 1000
     assert len(s["events"]) == 3
+
+
+def transaction_edit_case(kind):
+    s = empty()
+    if kind == "bank":
+        a = account(s, "Bank", "bank", "SGD")
+        event = command(s, "deposit", {"account": a, "amount": "20.00", "currency": "SGD", "date": "2026-02-01"})
+        changes = {"amount": "25.00"}
+    elif kind == "brokerage":
+        a = account(s, "Broker", "brokerage", "USD")
+        cash(s, a, "1000", "USD")
+        event = command(s, "buy", trade(a, quantity="2", price="10"))
+        changes = {"quantity": "3.0000000000"}
+    elif kind == "credit_card":
+        credit = command(s, "credit_account_add", {"name": "Cards"})
+        card = command(s, "credit_card_add", {"credit_account": credit["id"], "name": "Travel"})
+        event = command(s, "credit_purchase", {"credit_account": credit["id"], "card": card["id"],
+            "description": "Flight", "amount": "20.00", "date": "2026-02-01"})
+        changes = {"amount": "25.00"}
+    elif kind == "transfer":
+        source = account(s, "Source", "bank", "SGD")
+        destination = account(s, "Destination", "bank", "SGD")
+        cash(s, source, "1000", "SGD")
+        event = command(s, "transfer", {"account": source, "destination": destination,
+            "currency": "SGD", "amount": "100.00", "date": "2026-02-01"})
+        changes = {"amount": "90.00", "received": "90.00"}
+    elif kind == "cpf":
+        a = account(s, "CPF OA", "cpf", "SGD", cpf_type="OA")
+        event = command(s, "cpf_set", {"account": a, "amount": "2000.00", "date": "2026-02-01"})
+        changes = {"amount": "2100.00"}
+    else:
+        a = account(s, "Bank", "bank", "SGD")
+        cash(s, a, "1000", "SGD")
+        l = loan(s)
+        event = command(s, "repayment", {"loan": l["id"], "amount": "50.00", "date": "2026-02-15",
+            "allocations": [{"account": a, "amount": "50.00"}]}, "web")
+        changes = {"amount": "40.00", "allocations": [{"account": a, "amount": "40.00"}]}
+    return s, event, changes
+
+
+@pytest.mark.parametrize("kind", ["bank", "brokerage", "credit_card", "transfer", "cpf", "repayment"])
+@pytest.mark.parametrize("operation", ["correct", "void"])
+def test_transaction_history_edit_and_void_by_category(kind, operation):
+    s, original, changes = transaction_edit_case(kind)
+    if operation == "correct":
+        replacement = command(s, "correct", {"transaction": original["id"], "changes": changes}, "web")
+        assert replacement["replaces"] == original["id"]
+        assert replacement["status"] == "active"
+        for field, value in changes.items():
+            assert replacement["data"][field] == value
+        assert next(event for event in s["events"] if event["id"] == original["id"])["status"] == "superseded"
+    else:
+        result = command(s, "void", {"transaction": original["id"]}, "web")
+        assert result == {"id": original["id"], "status": "void"}
+        assert next(event for event in s["events"] if event["id"] == original["id"])["status"] == "void"
+    replay(s, TODAY)
+    credit_replay(s, TODAY)
+
+
+def test_correction_rejects_unknown_fields_and_stale_transaction_conflicts():
+    s, original, _ = transaction_edit_case("bank")
+    before = deepcopy(s)
+    with pytest.raises(Invalid, match="Unsupported correction fields"):
+        command(s, "correct", {"transaction": original["id"], "changes": {"amount": "21", "status": "void"}}, "web")
+    with pytest.raises(Invalid, match="exact text"):
+        command(s, "correct", {"transaction": original["id"], "changes": {"amount": 21.0}}, "web")
+    assert s == before
+    replacement = command(s, "correct", {"transaction": original["id"], "changes": {"amount": "21.00"}}, "web")
+    with pytest.raises(TransactionConflict, match="no longer active"):
+        command(s, "void", {"transaction": original["id"]}, "web")
+    assert replacement["replaces"] == original["id"]
+
+
+def test_archived_account_events_and_repayment_allocations_cannot_be_changed():
+    s = empty()
+    bank = account(s, "Archived bank", "bank", "SGD")
+    deposit = command(s, "deposit", {"account": bank, "currency": "SGD", "amount": "100", "date": "2026-01-01"})
+    command(s, "withdraw", {"account": bank, "currency": "SGD", "amount": "100", "date": "2026-01-02"})
+    command(s, "account_archive", {"account": bank})
+    with pytest.raises(Invalid, match="archived accounts"):
+        command(s, "void", {"transaction": deposit["id"]}, "web")
+
+    s = empty()
+    bank = account(s, "Repayment source", "bank", "SGD")
+    cash(s, bank, "500", "SGD")
+    l = loan(s)
+    payment = command(s, "repayment", {"loan": l["id"], "amount": "500.00", "date": "2026-02-15",
+        "allocations": [{"account": bank, "amount": "500.00"}]}, "web")
+    command(s, "account_archive", {"account": bank})
+    with pytest.raises(Invalid, match="archived accounts"):
+        command(s, "correct", {"transaction": payment["id"], "changes": {"amount": "400.00",
+            "allocations": [{"account": bank, "amount": "400.00"}]}}, "web")
 
 
 def test_missing_valuations_and_cpf_not_double_counted():
@@ -150,10 +243,20 @@ def test_bot_cannot_mutate_loan_or_repayment():
     with pytest.raises(Invalid, match="local web"):
         command(s, "repayment", p)
     payment = command(s, "repayment", p, "web")
-    with pytest.raises(Invalid, match="web-only"):
+    with pytest.raises(Invalid, match="local web UI"):
         command(s, "void", {"transaction": payment["id"]})
     command(s, "void", {"transaction": payment["id"]}, "web")
     assert replay(s, TODAY)[0][a, "SGD"] == 2000
+
+
+def test_bot_cannot_correct_or_void_non_repayment_transactions():
+    s, event, changes = transaction_edit_case("bank")
+    before = deepcopy(s)
+    with pytest.raises(Invalid, match="local web UI"):
+        command(s, "correct", {"transaction": event["id"], "changes": changes}, "bot")
+    with pytest.raises(Invalid, match="local web UI"):
+        command(s, "void", {"transaction": event["id"]}, "bot")
+    assert s == before
 
 
 def test_rate_change_and_projection_do_not_post_cash():
@@ -247,3 +350,60 @@ def test_credit_card_payment_requires_available_non_cpf_sgd_cash():
     with pytest.raises(Invalid, match="Insufficient"):
         command(s, "credit_payment", {"credit_account": credit["id"], "funding_account": bank,
                 "amount": "20", "date": "2026-09-04"})
+
+
+def test_monthly_cashflow_uses_active_cash_events_and_native_currency_series():
+    s = empty()
+    s["accounts"] = {"sgd": {"id": "sgd", "name": "SGD Bank", "type": "bank"},
+                      "usd": {"id": "usd", "name": "USD Bank", "type": "bank"},
+                      "broker": {"id": "broker", "name": "Brokerage", "type": "brokerage"},
+                      "cpf": {"id": "cpf", "name": "CPF OA", "type": "cpf"}}
+    s["credit_accounts"] = {"cardacct": {"id": "cardacct", "name": "Card"}}
+    def event(ident, kind, when, data, status="active", **extra):
+        s["events"].append({"id": ident, "kind": kind, "date": when, "order": len(s["events"]),
+                            "data": data, "status": status, **extra})
+    event("old", "deposit", "2026-01-29", {"account": "sgd", "currency": "SGD", "amount": "100"}, "superseded", replaces="x")
+    event("x", "deposit", "2026-01-29", {"account": "sgd", "currency": "SGD", "amount": "100"}, "superseded", replaces="new")
+    event("new", "deposit", "2026-02-02", {"account": "sgd", "currency": "SGD", "amount": "100.10"})
+    event("broker-deposit", "deposit", "2026-02-02", {"account": "broker", "currency": "USD", "amount": "900"})
+    event("cpf-withdraw", "withdraw", "2026-02-02", {"account": "cpf", "currency": "SGD", "amount": "30"})
+    event("void", "withdraw", "2026-02-03", {"account": "sgd", "currency": "SGD", "amount": "70"}, "void")
+    event("usd-dep", "deposit", "2026-02-05", {"account": "usd", "currency": "USD", "amount": "4.25"})
+    event("loan-in", "loan_disbursement", "2026-02-05", {"account": "sgd", "currency": "SGD", "amount": "15"})
+    event("repay", "repayment", "2026-02-06", {"loan": "loan", "amount": "7",
+          "allocations": [{"account": "sgd", "amount": "7"}]})
+    event("pay", "credit_payment", "2026-02-06", {"funding_account": "sgd", "credit_account": "cardacct", "currency": "SGD", "amount": "20"})
+    event("buy-card", "credit_purchase", "2026-02-07", {"credit_account": "cardacct", "card": "visa", "currency": "SGD", "amount": "50", "description": "Food"})
+    event("refund", "credit_refund", "2026-02-08", {"credit_account": "cardacct", "card": "visa", "currency": "SGD", "amount": "8", "description": "Return"})
+    event("transfer", "transfer", "2026-02-09", {"account": "sgd", "destination": "usd", "currency": "SGD", "amount": "30", "to_currency": "USD", "received": "22"})
+    event("bank-to-broker", "transfer", "2026-02-10", {"account": "sgd", "destination": "broker", "currency": "SGD", "amount": "9", "to_currency": "USD", "received": "9"})
+    event("broker-to-bank", "transfer", "2026-02-11", {"account": "broker", "destination": "sgd", "currency": "USD", "amount": "5", "to_currency": "SGD", "received": "6"})
+    event("opening", "opening_cash", "2026-02-01", {"account": "sgd", "currency": "SGD", "amount": "1000"})
+
+    result = cashflow_summary(s, TODAY, year=2026)
+    assert result["selection"] == {"type": "calendar_year", "year": 2026, "start_month": "2026-01",
+                                   "end_month": "2026-12", "current_month_partial": True}
+    sgd = result["currencies"]["SGD"]
+    feb = next(row for row in sgd["months"] if row["month"] == "2026-02")
+    assert feb["inflow"] == "121.10" and feb["outflow"] == "36" and feb["net"] == "85.10"
+    assert feb["internal_transfer_in"] == "0" and feb["internal_transfer_out"] == "30"
+    deposit = next(kind for kind in feb["by_kind"] if kind["kind"] == "deposit")
+    assert deposit["transactions"][0]["id"] == "new"
+    assert deposit["transactions"][0]["account_name"] == "SGD Bank"
+    bank_detail = next(row for row in feb["by_account"] if row["account"] == "sgd")
+    assert any(row["id"] == "new" for row in bank_detail["transactions"])
+    assert {kind["kind"] for kind in feb["by_kind"]}.isdisjoint({"credit_purchase", "credit_refund"})
+    assert "USD" in result["currencies"]
+    assert result["currencies"]["USD"]["totals"]["inflow"] == "4.25"
+    usd_feb = next(row for row in result["currencies"]["USD"]["months"] if row["month"] == "2026-02")
+    assert usd_feb["internal_transfer_in"] == "22"
+    contributing_ids = {transaction["id"] for row in feb["by_kind"] for transaction in row["transactions"]}
+    assert "bank-to-broker" in contributing_ids
+    assert not ({"broker-deposit", "cpf-withdraw"} & contributing_ids)
+
+
+def test_last_twelve_month_cashflow_marks_current_month_partial():
+    result = cashflow_summary(empty(), date(2026, 9, 22))
+    assert result["selection"] == {"type": "last_12_months", "year": None, "start_month": "2025-10",
+                                   "end_month": "2026-09", "current_month_partial": True}
+    assert len(result["currencies"]) == 0

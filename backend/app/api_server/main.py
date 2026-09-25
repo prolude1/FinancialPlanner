@@ -10,11 +10,11 @@ from fastapi.responses import JSONResponse, Response
 from starlette.middleware.sessions import SessionMiddleware
 from pydantic import ValidationError
 from ..core import store
-from ..core.domain import apply, Invalid
+from ..core.domain import apply, Invalid, TransactionConflict
 from ..core.finance import time_value
 from ..core.schemas import Login, TimeValue, validate_command
 from ..core.stocks import StockProviderError, service as stock_service
-from ..core.views import dashboard
+from ..core.views import dashboard, cashflow_summary
 from ..core import data_workbook
 
 SECRET = os.environ.get("SESSION_SECRET", "")
@@ -199,10 +199,19 @@ async def commit_data_import(request: Request):
 
 @app.get("/api/dashboard")
 def get_dashboard(request: Request):
-    identity(request)
-    result = dashboard(store.read(), today())
+    actor = identity(request)
+    result = dashboard(store.read(), today(), actor=actor)
     result["portfolio_history"] = store.read_portfolio_history()
     return result
+
+
+@app.get("/api/cashflow")
+def get_cashflow(request: Request, year: int | None = Query(default=None, ge=1970, le=9999)):
+    identity(request)
+    current = today()
+    if year is not None and year > current.year:
+        raise HTTPException(422, "Future calendar years are not available")
+    return cashflow_summary(store.read(), current, year=year)
 
 
 @app.post("/api/calculators/time-value")
@@ -275,5 +284,7 @@ async def mutate(command: str, request: Request):
     try:
         with store.transaction() as s:
             return apply(s, command, body, actor, request.headers.get("idempotency-key", ""), today())
+    except TransactionConflict as exc:
+        raise HTTPException(409, detail=str(exc)) from exc
     except (KeyError, TypeError) as exc:
         raise HTTPException(422, "Missing or invalid operation fields") from exc

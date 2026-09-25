@@ -2,10 +2,10 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 import uuid
 import pytest
-from app.worker import completed_session, resolve_trading_currency, provider_symbol
-from app.worker import build_portfolio_history, run_due
-from app.catalog import parse_us_catalog
-from app.domain import apply, empty
+from app.core.worker import completed_session, resolve_trading_currency, provider_symbol
+from app.core.worker import build_portfolio_history, run_due
+from app.core.catalog import parse_us_catalog
+from app.core.domain import apply, empty
 
 
 def test_us_exchange_currency_is_deterministic_without_provider_lookup():
@@ -83,12 +83,12 @@ def test_provider_schedule_backs_off_after_failure():
     (datetime(2026, 9, 23, 20, 1, tzinfo=timezone.utc), True),
 ])
 def test_price_warning_strict_48_hour_threshold(now, expected):
-    from app.providers import price_needs_attention
+    from app.core.providers import price_needs_attention
     assert price_needs_attention('NASDAQ', '2026-09-21', now) is expected
 
 
 def test_price_warning_respects_weekends_holidays_and_missing_sessions():
-    from app.providers import price_needs_attention
+    from app.core.providers import price_needs_attention
     # Independence Day closure and weekend: Thursday remains the latest close.
     assert not price_needs_attention('NYSE', '2026-07-02', datetime(2026, 7, 5, 23, tzinfo=timezone.utc))
     # An older Wednesday quote still warrants attention during that closure.

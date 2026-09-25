@@ -24,24 +24,6 @@ function badge(text, warning=false){ return `<span class="badge ${warning?'warni
 function empty(title, text){return `<div class="empty"><strong>${title}</strong><p>${text}</p></div>`;}
 function accountName(id){ return data.accounts.find(a=>a.id===id)?.name || id; }
 function creditAccountName(id){ return data.credit_accounts?.find(a=>a.id===id)?.name || id; }
-function transactionSummary(e){
-  const p=e.data;
-  const cardName=data.credit_accounts?.find(a=>a.id===p.credit_account)?.cards.find(c=>c.id===p.card)?.name || p.card || '';
-  if(e.kind==='credit_purchase') return `${cardName} · ${p.description} · SGD ${fmt(p.amount)} purchase`;
-  if(e.kind==='credit_refund') return `${cardName} · ${p.description} · SGD ${fmt(p.amount)} refund`;
-  if(e.kind==='credit_payment') return `SGD ${fmt(p.amount)} paid from ${accountName(p.funding_account)}`;
-  if(['deposit','withdraw'].includes(e.kind)) return `${p.description ? p.description+' · ' : ''}${p.currency || 'SGD'} ${fmt(p.amount)}`;
-  if(e.kind==='credit_set') return `Combined balance set to SGD ${fmt(p.amount)}`;
-  if(e.kind==='repayment') return `SGD ${fmt(p.amount)} · ${p.allocations.map(a=>`${accountName(a.account)}: ${fmt(a.amount)}`).join(' + ')}`;
-  if(['buy','sell','opening_holding'].includes(e.kind)) return `${p.quantity} ${p.symbol} · ${p.currency} ${p.price==='unknown'?'cost unknown':fmt(p.price)}`;
-  if(e.kind==='split') return `${p.symbol} · ${p.ratio} new per old share`;
-  if(e.kind==='transfer') return `${p.currency} ${fmt(p.amount)} → ${p.to_currency} ${fmt(p.received)} · ${accountName(p.destination)}`;
-  return `${p.currency || 'SGD'} ${fmt(p.amount)}`;
-}
-function historyTable(events){
-  if(!events.length) return empty('No transactions yet','Your recorded activity will appear here.');
-  return `<div class="table-wrap"><table><thead><tr><th>Transaction</th><th>Account</th><th>Details</th><th>Date</th><th>Status</th></tr></thead><tbody>${events.map(e=>`<tr class="status-${esc(e.status)}"><td>${badge(e.kind.replaceAll('_',' '))}<small class="code">${esc(e.id)}</small></td><td>${esc(e.data.account?accountName(e.data.account):e.data.credit_account?creditAccountName(e.data.credit_account):'Loan repayment')}</td><td>${esc(transactionSummary(e))}${e.adjustment!=null?`<small>Adjustment: ${esc(e.adjustment)}</small>`:''}</td><td>${esc(e.date)}</td><td>${esc(e.status)}</td></tr>`).join('')}</tbody></table></div>`;
-}
 function accountRow(a){return `<a class="account-item" href="#accounts/${esc(a.id)}"><span class="account-icon">${a.type==='cpf'?'◈':a.type==='brokerage'?'↗':'▤'}</span><span class="account-meta"><span class="account-name">${esc(a.name)}</span><small>${a.type==='cpf'?'CPF · '+esc(a.cpf_type):esc(a.type)}${a.archived?' · Archived':''}${a.cpf_stale?' · Update overdue':''}</small></span><span class="account-amount">SGD ${fmt(a.sgd)}${a.complete?'':' *'}<small>${Object.entries(a.native).map(([c,v])=>`${esc(c)} ${fmt(v)}`).join(' · ') || 'No balances'}</small></span><span class="arrow">›</span></a>`;}
 const accountTypeOrder=['bank','brokerage','cpf'];
 const accountTypeLabels={bank:'Bank accounts',brokerage:'Brokerage accounts',cpf:'CPF accounts'};
@@ -111,16 +93,16 @@ function creditCardsPage(id){
     <div class="summary-card"><div class="summary-label">Purchases less refunds</div><div class="summary-value"><small>SGD</small>${fmt(total('credit_purchase')-total('credit_refund'))}</div><div class="summary-foot">${esc(monthLabel)} · Refunds: SGD ${fmt(total('credit_refund'))}</div></div>
     <div class="summary-card"><div class="summary-label">Payments recorded</div><div class="summary-value"><small>SGD</small>${fmt(total('credit_payment'))}</div><div class="summary-foot">${esc(monthLabel)}</div></div></div>
     ${visible.length?creditCards(visible):`<div class="panel">${empty('No credit-card accounts yet','Use <code>/credit_account_add</code> in Telegram, then <code>/credit_card_add</code> to add your cards.')}</div>`}
-    <p class="section-note">Record purchases, refunds, payments, and balance updates through your private Telegram bot. Monthly totals include active entries only.</p>
+    <p class="section-note">Record new purchases, refunds, and payments through your private Telegram bot. Review and edit existing transactions in Transaction history. Monthly totals include active entries only.</p>
     <div class="panel"><div class="panel-head"><h2>Payment history</h2></div>${historyTable(events.filter(e=>e.kind==='credit_payment'))}</div>
     <div class="panel"><div class="panel-head"><h2>Card activity & balance updates</h2></div>${historyTable(events.filter(e=>e.kind!=='credit_payment'))}</div>`;
 }
 function overview(){
   const accounts=data.accounts.filter(a=>!a.archived);
-  return summary()+`<div class="main-grid">${allocation()}<div class="panel"><div class="panel-head"><h2>Your accounts</h2><a href="#accounts">View all ↗</a></div>${accounts.length?accountGroups(accounts):empty('Bring your accounts together','Send <code>/account_add</code> to your private bot, then record your opening balances.')}</div></div>${creditCards()}<div class="panel"><div class="panel-head"><h2>Recent activity</h2><a href="#activity">View history ↗</a></div>${historyTable(data.history.slice(0,6))}</div>`;
+  return summary()+`<div class="main-grid">${allocation()}<div class="panel"><div class="panel-head"><h2>Your accounts</h2><a href="#accounts">View all ↗</a></div>${accounts.length?accountGroups(accounts):empty('Bring your accounts together','Send <code>/account_add</code> to your private bot, then record your opening balances.')}</div></div>${creditCards()}<div class="panel"><div class="panel-head"><h2>Recent transactions</h2><a href="#activity">View transaction history ↗</a></div>${historyTable(latestTransactionsFirst(data.history).slice(0,6))}</div>`;
 }
 function accountsPage(id){
-  if(!id) return `<div class="notice soft">Account changes are recorded through Telegram for now. Use /account_add to create an account.</div><div class="panel">${data.accounts.length?accountGroups(data.accounts):empty('No accounts yet','Start with <code>/account_add</code> in Telegram.')}</div>`;
+  if(!id) return `<div class="notice soft">Create new accounts through Telegram. Existing account transactions can be reviewed and managed in Transaction history.</div><div class="panel">${data.accounts.length?accountGroups(data.accounts):empty('No accounts yet','Start with <code>/account_add</code> in Telegram.')}</div>`;
   const a=data.accounts.find(x=>x.id===id);
   if(!a) return empty('Account not found','Choose an account from the account list.');
   $('#page-title').textContent=a.name;
@@ -142,21 +124,22 @@ function render(){
   if(!data)return;
   const {page,id}=route();
   const focusedSearch=document.activeElement?.id==='stock-search-input',selection=focusedSearch?{start:document.activeElement.selectionStart,end:document.activeElement.selectionEnd}:null;
-  const titles={overview:['THE BIG PICTURE','Your financial overview','Every account. One place.'],stocks:['MARKET RESEARCH','Stocks','Completed-session prices and reported fundamentals.'],'credit-cards':['YOUR CREDIT CARDS','Credit-card dashboard','Balances, purchases, refunds, and payments in SGD.'],accounts:['YOUR ACCOUNTS','A home for every account','Balances and holdings, in their original currencies.'],loans:['YOUR COMMITMENTS','Loans & repayments','See what is outstanding and what comes next.'],calculator:['PLAN AHEAD','Present & Future Value','Explore contributions, withdrawals, returns, and time.'],'data-management':['YOUR DATA','Backup and restore','Export or replace all application data.'],activity:['YOUR FINANCIAL RECORD','Transaction history','A complete record, including corrections and cancellations.']};
+  const titles={overview:['THE BIG PICTURE','Your financial overview','Every account. One place.'],stocks:['MARKET RESEARCH','Stocks','Completed-session prices and reported fundamentals.'],'credit-cards':['YOUR CREDIT CARDS','Credit-card dashboard','Balances, purchases, refunds, and payments in SGD.'],accounts:['YOUR ACCOUNTS','A home for every account','Balances and holdings, in their original currencies.'],loans:['YOUR COMMITMENTS','Loans & repayments','See what is outstanding and what comes next.'],calculator:['PLAN AHEAD','Present & Future Value','Explore contributions, withdrawals, returns, and time.'],'data-management':['YOUR DATA','Backup and restore','Export or replace all application data.'],activity:['YOUR FINANCIAL RECORD','Transaction history','Search, review, correct, or cancel existing transactions. New transactions are still recorded in Telegram.']};
   const t=titles[page] || titles.overview;
   $('#page-eyebrow').textContent=t[0]; $('#page-title').textContent=t[1]; $('#page-subtitle').textContent=t[2];
-  $('#crumb').textContent=page==='credit-cards'?'Credit cards':page.charAt(0).toUpperCase()+page.slice(1);
+  $('#crumb').textContent=page==='credit-cards'?'Credit cards':page==='activity'?'Transaction history':page.charAt(0).toUpperCase()+page.slice(1);
   document.querySelectorAll('[data-nav]').forEach(el=>el.classList.toggle('active',el.dataset.nav===page));
   $('#today').textContent=new Date(data.as_of+'T12:00:00').toLocaleDateString('en-SG',{day:'numeric',month:'short',year:'numeric'});
   const failures=Object.entries(data.provider_status).filter(([,v])=>!v.ok).map(([k,v])=>`${k}: ${v.message}`);
   const warnings=['credit-cards','calculator','stocks'].includes(page)?[]:[...data.missing,...data.warnings,...failures];
   $('#notice').innerHTML=warnings.length?`<div class="notice"><strong>${data.complete?'Some valuations need attention':'Totals are incomplete'}</strong><ul>${warnings.map(w=>`<li>${esc(w)}</li>`).join('')}</ul></div>`:'';
-  $('#content').innerHTML=page==='stocks'?stocksPage(id):page==='credit-cards'?creditCardsPage(id):page==='accounts'?accountsPage(id):page==='loans'?loansPage():page==='calculator'?calculatorPage():page==='data-management'?backupPage():page==='activity'?`<div class="panel">${historyTable(data.history)}</div>`:overview();
+  $('#content').innerHTML=page==='stocks'?stocksPage(id):page==='credit-cards'?creditCardsPage(id):page==='accounts'?accountsPage(id):page==='loans'?loansPage():page==='calculator'?calculatorPage():page==='data-management'?backupPage():page==='activity'?activityPage():overview();
+  if(page==='activity'){if(bankCashflow)renderBankCashflow();else loadBankCashflow(bankCashflowYear);}
   document.querySelectorAll('.brokerage-chart').forEach(chart=>drawBrokerageChart(chart.dataset.account));
   if(focusedSearch){const input=$('#stock-search-input');input?.focus({preventScroll:true});if(input&&selection)input.setSelectionRange(selection.start,selection.end);}
 }
 async function load(){
-  data=await api('/dashboard'); revision=data.revision; dataDate=data.as_of; lastLoaded=Date.now();
+  data=await api('/dashboard'); revision=data.revision; dataDate=data.as_of; lastLoaded=Date.now();bankCashflow=null;
   $('#login').hidden=true; $('#shell').hidden=false;
   $('#connection').textContent='● Connected · updated '+new Date().toLocaleTimeString('en-SG',{hour:'2-digit',minute:'2-digit'});
   render();
@@ -175,7 +158,7 @@ function allocationRow(value={}){
 function repay(id, transaction){
   const loan=data.loans.find(l=>l.id===id), original=data.history.find(e=>e.id===transaction);
   openModal(transaction?'Correct repayment':'Record a repayment',`<form id="payment-form"><p class="form-note">${esc(loan.name)} · Outstanding SGD ${fmt(loan.outstanding)}. All funding entries are saved together. This records a payment you made; it does not send money.</p><div class="form-grid">${input('amount','Payment amount (SGD)','number',original?.data.amount || loan.installment,'min="0.01" step="0.01"')}${input('date','Payment date','date',original?.date || data.as_of,`max="${data.as_of}"`)}</div><h3>Fund this payment from</h3><div id="allocations">${(original?.data.allocations || [{}]).map(allocationRow).join('')}</div><button type="button" class="secondary small-button" data-action="add-allocation">+ Another account</button><p class="section-note" style="margin-top:14px">Amounts must add up to the payment total. Use SGD balances; convert other currencies before recording a repayment.</p>${formFooter(transaction?'Save correction':'Record repayment')}</form>`);
-  $('#payment-form').onsubmit=e=>{e.preventDefault();const f=e.target;const p={loan:id,amount:f.elements.amount.value,date:f.elements.date.value,allocations:[...f.querySelectorAll('.allocation-row')].map(r=>({account:r.querySelector('select').value,amount:r.querySelector('input').value}))}; submitCommand(transaction?'correct':'repayment',transaction?{transaction,changes:p}:p,f);};
+  $('#payment-form').onsubmit=e=>{e.preventDefault();const f=e.target;const amount=f.elements.amount.value,allocations=[...f.querySelectorAll('.allocation-row')].map(r=>({account:r.querySelector('select').value,amount:r.querySelector('input').value})),date=f.elements.date.value;if(transaction){const changes={amount,allocations};if(date!==original.date)changes.date=date;f.dataset.transactionManagement='true';f.dataset.transactionId=transaction;submitCommand('correct',{transaction,changes},f);}else submitCommand('repayment',{loan:id,amount,date,allocations},f);};
 }
 function rate(id){
   openModal('Record an interest-rate change',`<form id="rate-form"><p class="form-note">Use the first day of the month when the new annual rate applies. Past changes recalculate interest and must not invalidate recorded repayments.</p>${input('date','Effective date','date')}${input('rate','Annual rate (%)','number','','min="0" max="100" step="0.0001"')}${formFooter('Save rate')}</form>`);
@@ -186,8 +169,8 @@ async function submitCommand(command,payload,form){
   // Keep this key on network retries; create a new key only if the payload changes.
   const signature=JSON.stringify(payload);
   if(form.dataset.signature!==signature){form.dataset.signature=signature;form.dataset.key=crypto.randomUUID();}
-  try {await api('/commands/'+command,{method:'POST',headers:{'Idempotency-Key':form.dataset.key},body:signature});$('#modal').close();toast('Saved. Your balances are up to date.');await load();}
-  catch(error){$('#form-error').textContent=error.message;}
+  try {await api('/commands/'+command,{method:'POST',headers:{'Idempotency-Key':form.dataset.key},body:signature});$('#modal').close();toast('Saved. Your balances are up to date.');await load();if(form.dataset.transactionManagement==='true'&&form.dataset.transactionId){const row=document.getElementById(`transaction-${form.dataset.transactionId}`);row?.focus();row?.scrollIntoView({behavior:'smooth',block:'center'});}}
+  catch(error){$('#form-error').textContent=error.status===409&&form.dataset.transactionManagement==='true'?'This transaction changed elsewhere. History has been refreshed; review the latest entry before trying again.':error.message;if(error.status===409&&form.dataset.transactionManagement==='true'){try{await load();}catch{}}}
   finally{button.disabled=false;}
 }
 document.addEventListener('click',e=>{
@@ -198,6 +181,13 @@ document.addEventListener('click',e=>{
   if(action==='stock-search')searchStocks();
   if(action==='backup-export')exportBackup();
   if(action==='backup-sample')downloadBackupTemplate();
+  if(action==='history-edit')openTransactionEdit(b.dataset.id);
+  if(action==='history-cancel')confirmTransactionCancel(b.dataset.id);
+  if(action==='history-related')focusRelatedTransaction(b.dataset.id);
+  if(action==='cashflow-event')focusRelatedTransaction(b.dataset.id);
+  if(action==='cashflow-month')changeBankCashflowMonth(b.dataset.month);
+  if(action==='cashflow-retry')loadBankCashflow(bankCashflowYear);
+  if(action==='history-reset')resetHistoryFilters();
   if(action==='backup-confirm')confirmBackupImport();
   if(action==='backup-cancel')cancelBackupImport();
   if(action==='stock-option')chooseStockResult(Number(b.dataset.index));
@@ -219,6 +209,10 @@ document.addEventListener('click',e=>{
   }
 });
 document.addEventListener('change',e=>{
+  if(e.target.name==='credit_account'&&e.target.closest?.('#transaction-edit-form')){updateTransactionCardOptions(e.target.closest('#transaction-edit-form'));return;}
+  if(e.target.matches?.('[data-history-filter]')){updateHistoryFilter(e.target);return;}
+  if(e.target.id==='cashflow-year'){changeBankCashflowYear(e.target.value);return;}
+  if(e.target.id==='cashflow-month'){changeBankCashflowMonth(e.target.value);return;}
   if(e.target.id==='stock-exchange'){clearTimeout(stockSearchTimer);searchStocks();return;}
   if(e.target.id==='backup-file'){validateBackup(e.target.files?.[0]||null);return;}
   if(e.target.name==='cashflow_end_mode'){const root=e.target.closest('.cashflow-window'),custom=e.target.value==='custom',fields=root.querySelector('.custom-window-end');fields.hidden=!custom;fields.querySelectorAll('input').forEach(input=>input.disabled=!custom);updateContributionWindow(root);return;}
@@ -229,7 +223,7 @@ document.addEventListener('change',e=>{
   form.querySelector('.calculator-submit').textContent=pv?'Calculate present value':'Calculate future value';
 });
 function updateContributionWindow(root){const section=root.closest('.calculator-stream')||root.closest('form'),values=fieldValues(section);root.querySelector('[data-window-summary]').textContent=contributionWindowSummary(values);root.querySelector('.cashflow-window-error').textContent='';}
-document.addEventListener('input',e=>{if(e.target.id==='stock-search-input'){stockState.query=e.target.value;stockState.suggestionsOpen=true;stockState.highlight=-1;clearTimeout(stockSearchTimer);stockSearchTimer=setTimeout(searchStocks,300);e.target.setAttribute('aria-expanded','true');e.target.removeAttribute('aria-activedescendant');}const window=e.target.closest?.('.cashflow-window'),form=e.target.closest?.('#calculator-form');if(window)updateContributionWindow(window);if(form&&(window||e.target.name==='duration_years'||e.target.name==='duration_months'))validateContributionWindows(form);});
+document.addEventListener('input',e=>{if(e.target.matches?.('[data-history-filter]')){updateHistoryFilter(e.target);return;}if(e.target.id==='stock-search-input'){stockState.query=e.target.value;stockState.suggestionsOpen=true;stockState.highlight=-1;clearTimeout(stockSearchTimer);stockSearchTimer=setTimeout(searchStocks,300);e.target.setAttribute('aria-expanded','true');e.target.removeAttribute('aria-activedescendant');}const window=e.target.closest?.('.cashflow-window'),form=e.target.closest?.('#calculator-form');if(window)updateContributionWindow(window);if(form&&(window||e.target.name==='duration_years'||e.target.name==='duration_months'))validateContributionWindows(form);});
 document.addEventListener('keydown',e=>{
   if(e.target.id==='stock-search-input'){
     if(e.key==='ArrowDown'||e.key==='ArrowUp'){e.preventDefault();stockState.suggestionsOpen=true;const count=stockState.results.length;if(count)stockState.highlight=e.key==='ArrowDown'?Math.min(count-1,stockState.highlight+1):stockState.highlight<0?count-1:Math.max(0,stockState.highlight-1);renderStockSearch();return;}

@@ -12,6 +12,43 @@ class Invalid(ValueError):
     pass
 
 
+class TransactionConflict(Invalid):
+    """A transaction selected for correction is no longer active."""
+
+
+CORRECTION_FIELDS = {
+    "opening_cash": frozenset(("account", "amount", "currency", "date")),
+    "deposit": frozenset(("account", "amount", "currency", "date", "description")),
+    "withdraw": frozenset(("account", "amount", "currency", "date", "description")),
+    "buy": frozenset(("account", "exchange", "symbol", "asset_class", "currency", "quantity", "price", "date")),
+    "sell": frozenset(("account", "exchange", "symbol", "asset_class", "currency", "quantity", "price", "date")),
+    "opening_holding": frozenset(("account", "exchange", "symbol", "asset_class", "currency", "quantity", "price", "date")),
+    "transfer": frozenset(("account", "destination", "currency", "to_currency", "amount", "received", "date")),
+    "cpf_set": frozenset(("account", "amount", "currency", "date")),
+    "split": frozenset(("account", "exchange", "symbol", "asset_class", "currency", "ratio", "date")),
+    "repayment": frozenset(("loan", "amount", "date", "allocations")),
+    "credit_purchase": frozenset(("credit_account", "card", "description", "amount", "date")),
+    "credit_refund": frozenset(("credit_account", "card", "description", "amount", "date")),
+    "credit_payment": frozenset(("credit_account", "funding_account", "amount", "date")),
+}
+CORRECTION_DECIMAL_FIELDS = {
+    "opening_cash": ("amount",), "deposit": ("amount",), "withdraw": ("amount",),
+    "buy": ("quantity", "price"), "sell": ("quantity", "price"),
+    "opening_holding": ("quantity", "price"), "transfer": ("amount", "received"),
+    "cpf_set": ("amount",), "split": ("ratio",), "repayment": ("amount",),
+    "credit_purchase": ("amount",), "credit_refund": ("amount",), "credit_payment": ("amount",),
+}
+
+
+def _transaction_accounts(event):
+    data = event["data"]
+    if event["kind"] == "repayment":
+        return [allocation.get("account") for allocation in data.get("allocations", [])]
+    if event["kind"] == "credit_payment":
+        return [data.get("funding_account")]
+    return [data.get("account"), data.get("destination")]
+
+
 def decimal(value, positive=False):
     try:
         result = Decimal(str(value))
@@ -335,6 +372,10 @@ def apply(s, command, payload, actor, key, today=None):
         raise Invalid("Credit-card balances are calculated from purchases, refunds, and payments")
     if not key or len(key) > 160:
         raise Invalid("A valid idempotency key is required")
+    if actor == "bot" and (command.startswith("loan") or command == "repayment"):
+        raise Invalid("Loan operations are available only in the local web UI")
+    if actor == "bot" and command in ("correct", "void"):
+        raise Invalid("Transaction editing and cancellation are available only in the local web UI")
     receipt_key = actor + ":" + key
     if receipt_key in s["receipts"]:
         receipt = s["receipts"][receipt_key]
@@ -342,8 +383,6 @@ def apply(s, command, payload, actor, key, today=None):
             raise Invalid("Idempotency key was already used for a different request")
         return receipt["result"]
     original_payload, p = deepcopy(payload), deepcopy(payload)
-    if actor == "bot" and (command.startswith("loan") or command == "repayment"):
-        raise Invalid("Loan operations are available only in the local web UI")
     result = {}
     if command == "credit_account_add":
         name = str(p.get("name", "")).strip()
@@ -438,13 +477,29 @@ def apply(s, command, payload, actor, key, today=None):
         if command in ("correct", "void"):
             previous = next((e for e in s["events"] if e["id"] == p.get("transaction") and e["status"] == "active"), None)
             if not previous:
-                raise Invalid("Active transaction not found")
+                raise TransactionConflict("Transaction is no longer active; refresh history and retry")
             if previous["kind"] == "loan_disbursement":
                 raise Invalid("Loan opening disbursements cannot be edited independently")
-            if actor == "bot" and previous["kind"] == "repayment":
-                raise Invalid("Repayment corrections are web-only")
-            if any(s["accounts"].get(aid, {}).get("archived") for aid in [previous["data"].get("account"), previous["data"].get("destination")]):
+            if previous["kind"] not in CORRECTION_FIELDS:
+                raise Invalid("This transaction type cannot be edited independently")
+            if any(s["accounts"].get(aid, {}).get("archived") for aid in _transaction_accounts(previous)):
                 raise Invalid("Transactions in archived accounts cannot be changed")
+            if command == "correct":
+                changes = p.get("changes")
+                if not isinstance(changes, dict) or not changes:
+                    raise Invalid("Provide at least one transaction field to change")
+                unexpected = set(changes) - CORRECTION_FIELDS[previous["kind"]]
+                if unexpected:
+                    raise Invalid("Unsupported correction fields: " + ", ".join(sorted(unexpected)))
+                decimal_fields = CORRECTION_DECIMAL_FIELDS[previous["kind"]]
+                if any(field in changes and not isinstance(changes[field], str) for field in decimal_fields):
+                    raise Invalid("Correction decimal values must be sent as exact text")
+                if "allocations" in changes:
+                    allocations = changes["allocations"]
+                    if not isinstance(allocations, list) or any(
+                            not isinstance(item, dict) or not isinstance(item.get("amount"), str)
+                            for item in allocations):
+                        raise Invalid("Repayment allocations must contain exact decimal text values")
             previous["status"] = "superseded" if command == "correct" else "void"
             previous["changed_by"] = actor
             kind = previous["kind"]

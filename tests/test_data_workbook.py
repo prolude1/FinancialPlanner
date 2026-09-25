@@ -7,7 +7,7 @@ import pytest
 from openpyxl import load_workbook
 from sqlalchemy import create_engine, insert, select
 
-from app import store
+from app.core import store
 from app.core import data_workbook as workbook
 
 
