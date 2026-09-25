@@ -4,8 +4,8 @@ from unittest.mock import Mock
 import pytest
 from sqlalchemy import create_engine
 
-from app import store
-from app.stocks import StockProviderError, StockService, parse_security_id
+from app.core import store
+from app.core.stocks import StockProviderError, StockService, parse_security_id
 
 
 class FakePrices:

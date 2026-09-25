@@ -30,3 +30,9 @@ def test_api_does_not_import_telegram_package():
     violations = [(str(path), module) for path, *modules in imports_under("api_server")
                   for module in modules if "telegram_bot" in module]
     assert violations == []
+
+
+def test_redundant_flat_module_aliases_are_removed():
+    aliases = ("api", "bot", "catalog", "domain", "finance", "providers", "schemas",
+               "stocks", "store", "views", "worker")
+    assert [str(APP / f"{name}.py") for name in aliases if (APP / f"{name}.py").exists()] == []

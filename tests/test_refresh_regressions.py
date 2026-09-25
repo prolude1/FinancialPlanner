@@ -5,8 +5,8 @@ from unittest.mock import Mock
 import pytest
 from sqlalchemy import create_engine
 
-from app import catalog, store, worker
-from app.domain import apply, empty
+from app.core import catalog, store, worker
+from app.core.domain import apply, empty
 
 
 @pytest.fixture

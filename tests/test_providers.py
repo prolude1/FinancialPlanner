@@ -1,6 +1,6 @@
 import pytest
 
-from app.providers import StockPriceProvider, StockPriceProviderFactory, YahooStockPriceProvider
+from app.core.providers import StockPriceProvider, StockPriceProviderFactory, YahooStockPriceProvider
 
 
 def test_factory_builds_configured_stock_price_provider():

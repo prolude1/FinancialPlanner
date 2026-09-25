@@ -104,7 +104,9 @@ Every command payload is parsed through a command-specific Pydantic model with u
 | `GET /api/stocks/{security_id}/earnings/latest` | Latest completed quarterly statement, with annual fallback |
 | `POST /api/commands/{command}` | Shared business operations; requires `Idempotency-Key` |
 
-Commands are `account_add`, `account_archive`, `opening_cash`, `opening_holding`, `deposit`, `withdraw`, `buy`, `sell`, `transfer`, `cpf_set`, `split`, `correct`, `void`, `loan_add`, `loan_rate`, and `repayment`. The bot cannot create loans, change rates, post repayments, or correct/cancel repayments. These restrictions are enforced by the API domain layer, not merely hidden in the Telegram menu.
+Commands are `account_add`, `account_archive`, `opening_cash`, `opening_holding`, `deposit`, `withdraw`, `buy`, `sell`, `transfer`, `cpf_set`, `split`, `credit_purchase`, `credit_refund`, `credit_payment`, `correct`, `void`, `loan_add`, `loan_rate`, and `repayment`. The bot cannot correct or cancel any event, and cannot create loans, change rates, or post repayments. These restrictions are enforced by the API domain layer, not merely hidden in the Telegram menu.
+
+`GET /api/dashboard` returns the complete event ledger in `history`, newest first. Each event includes its stable `id`, `kind`, complete `data` payload, `status`, actor/timestamp audit fields, `replaces`/`replaced_by` links, any derived adjustment, and `can_edit`, `can_void`, and `editable_fields` capabilities. The web client edits an active event with `POST /api/commands/correct` and `{transaction, changes}` where `changes` contains one or more partial fields from `editable_fields`; it cancels with `POST /api/commands/void` and `{transaction}`. Both require the normal signed-in session, CSRF check, and idempotency key. Corrections append a linked replacement and retain the prior event. Domain validation checks the event-specific field set and exact decimal text, then replays the full ledger under the application write lock before committing. If a stale event ID is no longer active, the command returns HTTP 409 so the client can refresh history. Invalid decimals, archived-account references, and any correction that breaks balances return HTTP 422. Loan disbursements are never independently editable; repayments are editable only from the web client. Bot-authenticated dashboard reads report all events as noneditable, and the domain rejects bot correction/void commands even if an old handler sends them.
 
 The time-value endpoint accepts a present- or future-value mode, a lump sum or target,
 a signed recurring cash flow, annual nominal percentage rate, duration in years and
@@ -120,6 +122,12 @@ overall duration. The response includes aggregate totals and a full result and
 schedule for every stream. An aggregate effective annual rate is deliberately
 omitted because it would be misleading across independently compounded returns.
 Each stream may also set `cashflow_start_month` and `cashflow_duration_months`.
+
+### Monthly cashflow summary
+
+`GET /api/cashflow` returns a read-only actual-cashflow view for bank accounts, derived from active ledger events. Without a query parameter it covers the latest 12 calendar months; `?year=YYYY` selects a calendar year. The response has `as_of`, a `selection` object (`type`, `year`, `start_month`, `end_month`, `current_month_partial`), and a `currencies` object keyed by native currency. Each currency contains month rows and totals with decimal-string `inflow`, `outflow`, and `net`. Month rows include `by_kind` and `by_account`; each drilldown includes transaction rows with event ID, date, account ID/name, and amount. No unlike currencies are added or converted. Deposits are labeled as deposits and are not classified as income.
+
+The v1 cash movement includes bank deposits and loan proceeds as inflows, and bank withdrawals, bank-funded repayments, and bank-funded credit-card payments as outflows. Brokerage and CPF activity, card purchases/refunds, opening balances, resets, securities, and other non-cash adjustments are excluded. Transfers between bank accounts are reported in separate `internal_transfer_in` and `internal_transfer_out` fields and are excluded from net cashflow; transfers crossing the bank boundary count only their bank-side leg as an inflow or outflow. Corrections contribute only through their active replacement event; void and superseded events are ignored. The current calendar month is flagged as partial and future months in the selected year are zero-filled.
 Only the recurring cash flow is limited by that window: the stream's opening
 value and all accumulated returns continue compounding through the shared overall
 duration. Windows must align with the selected cash-flow frequency, which keeps

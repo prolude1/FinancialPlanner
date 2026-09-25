@@ -35,8 +35,6 @@ FIELDS = {
     "credit_purchase": [("card", "Which card was used?"), ("description", "Purchase description?"), ("amount", "Purchase amount in SGD?"), ("date", "Purchase date (YYYY-MM-DD or today)?")],
     "credit_refund": [("credit_account", "Credit-card account ID?"), ("card", "Card ID?"), ("description", "Refund description?"), ("amount", "Refund amount in SGD?"), ("date", "Refund date (YYYY-MM-DD or today)?")],
     "credit_payment": [("credit_account", "Credit-card account ID?"), ("funding_account", "Account ID funding the payment?"), ("amount", "Payment amount in SGD?"), ("date", "Payment date (YYYY-MM-DD or today)?")],
-    "void": [("transaction", "Transaction reference to cancel? History will be retained.")],
-    "correct": [("transaction", "Transaction reference to correct?"), ("field", "Field to change (amount, quantity, price, date, account, received, description)?"), ("value", "Corrected value?")],
 }
 TRADE = [("account", "Brokerage account ID?"), ("exchange", "Exchange: NYSE, NASDAQ, LSE or SGX? You can also enter EXCHANGE:TICKER, e.g. NASDAQ:AAPL."),
          ("symbol", "Trading symbol, e.g. AAPL or VWRA?"), ("asset_class", "Asset class: equity or etf?"),
@@ -53,7 +51,6 @@ COMMAND_DESCRIPTIONS = {
     "help": "Show every available command",
     "account": "Account actions and balances",
     "creditcard": "Credit-card actions and balances",
-    "history": "Show recent transactions",
     "deposit": "Record money entering an account",
     "withdraw": "Record spending or money leaving",
     "transfer": "Move money between accounts",
@@ -67,8 +64,6 @@ COMMAND_DESCRIPTIONS = {
     "sell": "Sell shares or ETFs",
     "opening_holding": "Record an existing holding",
     "split": "Record a stock split",
-    "correct": "Correct an existing transaction",
-    "void": "Cancel an existing transaction",
 }
 
 ACCOUNT_ACTIONS = [
@@ -344,6 +339,12 @@ def handle(update, owner, query, mutate, resolve_instrument=None, calculate=None
     if uid < state["bot"]["offset"]:
         return None
     session = state["bot"]["session"]
+    retired_commands = {"history", "correct", "void"}
+    legacy_edit_session = bool(session and session.get("command") in {"correct", "void"})
+    if legacy_edit_session:
+        # Persisted conversation state can outlive a bot restart. Never let a
+        # post-upgrade reply finish an edit workflow removed from Telegram.
+        session = None
     if session and time.time() - session["started"] > 1800:
         session = None
     result = "Use /help for available commands."
@@ -352,9 +353,13 @@ def handle(update, owner, query, mutate, resolve_instrument=None, calculate=None
     last_stock = None
     command = text.split(" ", 1)[0].split("@", 1)[0].lstrip("/").lower()
     command = COMMAND_ALIASES.get(command, command)
-    if text.startswith("/"):
+    if legacy_edit_session:
+        result = "This older Telegram edit was cancelled without changes. View and edit transactions in the web app."
+    elif text.startswith("/") and command in retired_commands:
+        result = "Transaction history and edits are handled in the web app. No changes were made."
+    elif text.startswith("/"):
         if command in ("start", "help"):
-            result = "Your private financial ledger.\n/account · /creditcard · /calculator · /history\n/deposit · /withdraw · /transfer · /cpf_set\n/purchase · /payment\n/buy · /sell · /opening_holding · /split\n/correct · /void · /cancel\nLoans are managed in the local web UI."
+            result = "Your private financial ledger.\n/account · /creditcard · /calculator\n/deposit · /withdraw · /transfer · /cpf_set\n/purchase · /payment\n/buy · /sell · /opening_holding · /split · /cancel\nView or edit transactions in the local web app. Loans are managed there too."
         elif command == "cancel":
             session, result = None, "Cancelled. Nothing saved."
         elif command == "creditcard":
@@ -400,14 +405,9 @@ def handle(update, owner, query, mutate, resolve_instrument=None, calculate=None
                 else:
                     result = format_financials(stocks("financials", security_id))
                 pending_markup = stock_keyboard(security_id)
-        elif command in ("accounts", "credit_accounts", "account", "history"):
+        elif command in ("accounts", "credit_accounts", "account"):
             data = query()
-            if command == "history":
-                result = "Recent transactions:\n" + "\n".join(
-                    f"{e['id']} · {e['date']} · {e['kind']}"
-                    + (f" · {e['data']['description']}" if e["data"].get("description") else "")
-                    + f" · {e['status']}" for e in data["history"][:25])
-            elif command == "accounts":
+            if command == "accounts":
                 active = [a for a in data["accounts"] if not a["archived"]]
                 result = "Accounts (tap and hold an ID to copy it):\n" + (grouped_accounts(
                     active, lambda a: f"• {a['name']} — {a['id']} — "
@@ -433,16 +433,9 @@ def handle(update, owner, query, mutate, resolve_instrument=None, calculate=None
                 result = "No completed operation to confirm."
             else:
                 payload = dict(session["data"])
-                if session["command"] == "correct":
-                    if payload["field"] not in {"amount", "quantity", "price", "date", "account", "received", "description"}:
-                        result = "Unsupported correction field. /cancel and start again."
-                        payload = None
-                    else:
-                        payload = {"transaction": payload["transaction"], "changes": {payload["field"]: payload["value"]}}
-                if payload is not None:
-                    saved = mutate(session["command"], payload, "telegram-" + str(uid))
-                    result = "Saved. Reference: " + str(saved.get("id", "ok")) + ". The dashboard will refresh automatically."
-                    session = None
+                saved = mutate(session["command"], payload, "telegram-" + str(uid))
+                result = "Saved. Reference: " + str(saved.get("id", "ok")) + ". The dashboard will refresh automatically."
+                session = None
         elif command in FIELDS:
             session = {"command": command, "data": {}, "index": 0, "started": time.time()}
             result = prompt(session, state)
@@ -644,4 +637,3 @@ def handle(update, owner, query, mutate, resolve_instrument=None, calculate=None
         if last_stock is not None:
             s["bot"]["last_stock"] = last_stock
     return result
-

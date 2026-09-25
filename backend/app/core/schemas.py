@@ -163,7 +163,7 @@ class Repayment(DatedAmount):
 
 class Correction(Command):
     transaction: str
-    changes: dict[str, Any]
+    changes: dict[str, Any] = Field(min_length=1)
 
 
 class Void(Command):

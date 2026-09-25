@@ -1,0 +1,38 @@
+name: Podman image build
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "backend/**"
+      - "web/**"
+      - ".dockerignore"
+      - ".github/workflows/podman-build.yml"
+  pull_request:
+    paths:
+      - "backend/**"
+      - "web/**"
+      - ".dockerignore"
+      - ".github/workflows/podman-build.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build-images:
+    name: Build backend and web images
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Podman
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes podman
+
+      - name: Build backend image
+        run: podman build --tag financial-planner-backend:ci --file backend/Dockerfile .
+
+      - name: Build web image
+        run: podman build --tag financial-planner-web:ci --file web/Dockerfile web

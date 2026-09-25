@@ -5,11 +5,14 @@
   <meta name="theme-color" content="#123b35"><title>Ledger · Personal finance</title>
   <link rel="stylesheet" href="/style.css">
   <link rel="stylesheet" href="/data-management.css">
+  <link rel="stylesheet" href="/activity.css">
   <link rel="stylesheet" href="/calculator.css">
   <link rel="stylesheet" href="/stocks.css">
   <script src="/data-management.js" defer></script>
   <script src="/stocks.js" defer></script>
   <script src="/calculator.js" defer></script>
+  <script src="/cashflow.js" defer></script>
+  <script src="/activity.js" defer></script>
   <script src="/app.js" defer></script>
 </head>
 <body>
@@ -34,9 +37,9 @@
         <a href="#loans" data-nav="loans"><span>↗</span> Loans</a>
         <a href="#calculator" data-nav="calculator"><span>∿</span> Calculator</a>
         <a href="#data-management" data-nav="data-management"><span>⇅</span> Data management</a>
-        <a href="#activity" data-nav="activity"><span>≋</span> Activity</a>
+        <a href="#activity" data-nav="activity" aria-label="Transaction history"><span>≋</span> Transaction history</a>
       </nav>
-      <div class="sidebar-bottom"><div class="local-label"><span class="dot"></span> Local workspace</div><p>Record asset changes with your private Telegram bot.</p><button id="logout" class="text-button">Sign out ↗</button></div>
+      <div class="sidebar-bottom"><div class="local-label"><span class="dot"></span> Local workspace</div><p>Record new transactions with your private Telegram bot. Review, correct, and cancel existing transactions here.</p><button id="logout" class="text-button">Sign out ↗</button></div>
     </aside>
     <main>
       <header class="topbar"><span>Personal finance <span class="breadcrumb">/ <span id="crumb">Overview</span></span></span><span id="connection" role="status">Connecting…</span></header>

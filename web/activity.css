@@ -1,0 +1,223 @@
+.activity-filters{
+  display:grid;
+  grid-template-columns:minmax(220px,2fr) repeat(3,minmax(135px,1fr)) repeat(2,minmax(135px,1fr)) auto;
+  gap:10px;
+  align-items:end;
+  margin:4px 0 20px
+}
+.activity-filters label{
+  margin:0;
+  font-size:11px
+}
+.activity-filters input,.activity-filters select{
+  min-width:0;
+  margin-top:5px
+}
+.activity-filters button{
+  white-space:nowrap
+}
+.history-result-count{
+  margin:0 0 8px;
+  color:var(--muted);
+  font-size:11px
+}
+.history-actions{
+  min-width:150px
+}
+.history-actions button{
+  margin-right:8px
+}
+.danger-text{
+  color:var(--red)
+}
+.history-actions button:disabled{
+  cursor:not-allowed;
+  opacity:.5
+}
+.action-reason,.history-relation,.field-readonly{
+  display:block;
+  color:var(--muted);
+  font-size:10px;
+  line-height:1.4
+}
+.action-reason{
+  max-width:250px;
+  margin-top:4px
+}
+.history-relation .text-button{
+  font-size:10px
+}
+.field-readonly{
+  margin:0 0 16px
+}
+.status-superseded,.status-void{
+  opacity:.72
+}
+.bank-cashflow{
+  margin-bottom:18px
+}
+.bank-cashflow .panel-head{
+  align-items:flex-start
+}
+.bank-cashflow .panel-head h2{
+  margin:0 0 7px
+}
+.bank-cashflow .panel-head .section-note{
+  max-width:780px;
+  margin:0
+}
+.bank-cashflow .panel-head>small{
+  white-space:nowrap
+}
+.cashflow-controls,.cashflow-month-controls{
+  display:flex;
+  align-items:end;
+  gap:10px
+}
+.cashflow-controls{
+  justify-content:space-between;
+  margin:18px 0 5px
+}
+.cashflow-controls label{
+  min-width:180px;
+  margin:0;
+  font-size:11px
+}
+.cashflow-controls select{
+  margin-top:5px
+}
+.cashflow-month-controls label{
+  min-width:200px
+}
+.cashflow-month-controls button{
+  min-height:38px
+}
+.cashflow-as-of,.cashflow-scope-note{
+  color:var(--muted);
+  font-size:11px
+}
+.cashflow-currency{
+  border-top:1px solid var(--line);
+  margin-top:14px;
+  padding-top:15px
+}
+.cashflow-currency-head{
+  display:flex;
+  align-items:center;
+  justify-content:space-between
+}
+.cashflow-currency-head h3{
+  margin:0
+}
+.cashflow-currency-head span{
+  color:var(--muted);
+  font-size:11px
+}
+.cashflow-monthly-overview{
+  margin:14px 0
+}
+.cashflow-monthly-overview h4{
+  margin:0 0 7px
+}
+.cashflow-monthly-overview th[scope="row"]{
+  font-weight:500
+}
+.cashflow-monthly-overview .text-button{
+  text-align:left;
+  font-size:11px
+}
+.cashflow-month-selected{
+  background:rgba(185,210,145,.13)
+}
+.cashflow-month-selected .text-button{
+  font-weight:700
+}
+.cashflow-totals{
+  display:grid;
+  grid-template-columns:repeat(3,minmax(0,1fr));
+  gap:10px;
+  margin-top:12px
+}
+.cashflow-totals>div{
+  display:grid;
+  gap:5px;
+  padding:13px;
+  border:1px solid var(--line);
+  border-radius:10px
+}
+.cashflow-totals small{
+  color:var(--muted);
+  font-size:10px
+}
+.cashflow-totals strong{
+  font-size:17px
+}
+.cashflow-breakdowns{
+  display:grid;
+  grid-template-columns:repeat(2,minmax(0,1fr));
+  gap:16px;
+  margin-top:16px
+}
+.cashflow-breakdowns h4{
+  margin:0 0 8px
+}
+.cashflow-breakdowns td details summary{
+  cursor:pointer;
+  color:var(--green);
+  white-space:nowrap
+}
+.cashflow-transaction-list{
+  min-width:220px;
+  margin:8px 0 2px;
+  padding-left:18px
+}
+.cashflow-transaction-list li{
+  margin:5px 0
+}
+.cashflow-transaction-list .text-button{
+  text-align:left;
+  font-size:11px
+}
+.cashflow-transaction-list small{
+  display:block;
+  color:var(--muted)
+}
+#history-results tr:focus{
+  outline:2px solid #9fc3a9;
+  outline-offset:-2px
+}
+@media(max-width:1100px){
+  .activity-filters{
+    grid-template-columns:repeat(3,minmax(0,1fr))
+  }
+}
+@media(max-width:700px){
+  .cashflow-controls,.cashflow-month-controls{
+    align-items:stretch
+  }
+  .cashflow-controls{
+    flex-direction:column
+  }
+  .cashflow-controls label,.cashflow-month-controls label{
+    min-width:0
+  }
+  .cashflow-breakdowns{
+    grid-template-columns:1fr
+  }
+  .cashflow-totals{
+    grid-template-columns:1fr
+  }
+  .cashflow-totals>div{
+    grid-template-columns:1fr auto;
+    align-items:center
+  }
+  .activity-filters{
+    grid-template-columns:1fr 1fr
+  }
+  .activity-filters label:first-child{
+    grid-column:1/-1
+  }
+  .history-actions{
+    min-width:125px
+  }
+}
