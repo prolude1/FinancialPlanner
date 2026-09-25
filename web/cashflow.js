@@ -43,7 +43,8 @@ function cashflowDefaultMonth(payload){
 
 function cashflowTransactionButtons(rows){
   if(!rows?.length)return '<span class="muted">No contributing transactions</span>';
-  return `<ul class="cashflow-transaction-list">${rows.map(row=>`<li><button type="button" class="text-button" data-action="cashflow-event" data-id="${esc(row.id)}">${esc(row.date)} · ${esc(transactionKindLabels[row.kind]||row.kind||'Transaction')} · ${cashflowAmount(row.amount,row.currency||'')}</button>${row.description?`<small>${esc(row.description)}</small>`:''}</li>`).join('')}</ul>`;
+  const latest=[...rows].sort((a,b)=>String(b.date||'').localeCompare(String(a.date||''))||String(b.id||'').localeCompare(String(a.id||'')));
+  return `<ul class="cashflow-transaction-list">${latest.map(row=>`<li><button type="button" class="text-button" data-action="cashflow-event" data-id="${esc(row.id)}">${esc(row.date)} · ${esc(transactionKindLabels[row.kind]||row.kind||'Transaction')} · ${cashflowAmount(row.amount,row.currency||'')}</button>${row.description?`<small>${esc(row.description)}</small>`:''}</li>`).join('')}</ul>`;
 }
 
 function cashflowBreakdownRows(items,fieldLabels,currency){
@@ -58,7 +59,7 @@ function cashflowBreakdownRows(items,fieldLabels,currency){
 }
 
 function cashflowMonthlyOverview(series,selectedMonth,asOf,selectPartial){
-  return `<section class="cashflow-monthly-overview" aria-label="Monthly ${esc(series.currency)} cash flow"><h4>Monthly overview · ${esc(series.currency)}</h4><div class="table-wrap"><table><thead><tr><th>Month</th><th class="num">Inflow</th><th class="num">Outflow</th><th class="num">Net</th></tr></thead><tbody>${series.months.filter(row=>row.month<=asOf.slice(0,7)).map(row=>`<tr class="${row.month===selectedMonth?'cashflow-month-selected':''}"><th scope="row"><button type="button" class="text-button" data-action="cashflow-month" data-month="${esc(row.month)}" aria-pressed="${row.month===selectedMonth}">${esc(cashflowMonthLabel(row.month))}${selectPartial&&row.month===asOf.slice(0,7)?' · partial':''}</button></th><td class="num">${cashflowAmount(row.inflow,series.currency)}</td><td class="num">${cashflowAmount(row.outflow,series.currency)}</td><td class="num ${Number(row.net)<0?'negative':''}">${cashflowAmount(row.net,series.currency)}</td></tr>`).join('')}</tbody></table></div></section>`;
+  return `<section class="cashflow-monthly-overview" aria-label="Monthly ${esc(series.currency)} cash flow"><h4>Monthly overview · ${esc(series.currency)}</h4><div class="table-wrap"><table><thead><tr><th>Month</th><th class="num">Inflow</th><th class="num">Outflow</th><th class="num">Net</th></tr></thead><tbody>${series.months.filter(row=>row.month<=asOf.slice(0,7)).slice().sort((a,b)=>b.month.localeCompare(a.month)).map(row=>`<tr class="${row.month===selectedMonth?'cashflow-month-selected':''}"><th scope="row"><button type="button" class="text-button" data-action="cashflow-month" data-month="${esc(row.month)}" aria-pressed="${row.month===selectedMonth}">${esc(cashflowMonthLabel(row.month))}${selectPartial&&row.month===asOf.slice(0,7)?' · partial':''}</button></th><td class="num">${cashflowAmount(row.inflow,series.currency)}</td><td class="num">${cashflowAmount(row.outflow,series.currency)}</td><td class="num ${Number(row.net)<0?'negative':''}">${cashflowAmount(row.net,series.currency)}</td></tr>`).join('')}</tbody></table></div></section>`;
 }
 
 function bankCashflowCurrencyCard(series,month,isPartial,asOf,selectPartial){
@@ -78,7 +79,7 @@ function renderBankCashflow(){
   if(!uniqueMonths.includes(bankCashflowMonth))bankCashflowMonth=cashflowDefaultMonth(payload);
   const years=cashflowYears(),yearValue=bankCashflowYear==='last12'?'last12':String(bankCashflowYear);
   const options=`<option value="last12" ${yearValue==='last12'?'selected':''}>Latest 12 months</option>${years.map(year=>`<option value="${year}" ${yearValue===String(year)?'selected':''}>${year}</option>`).join('')}`;
-  const monthOptions=uniqueMonths.map(month=>`<option value="${esc(month)}" ${month===bankCashflowMonth?'selected':''}>${esc(cashflowMonthLabel(month))}</option>`).join('');
+  const monthOptions=uniqueMonths.slice().reverse().map(month=>`<option value="${esc(month)}" ${month===bankCashflowMonth?'selected':''}>${esc(cashflowMonthLabel(month))}</option>`).join('');
   const index=uniqueMonths.indexOf(bankCashflowMonth),previous=index>0?uniqueMonths[index-1]:'',next=index>=0&&index<uniqueMonths.length-1?uniqueMonths[index+1]:'';
   const currencies=Object.values(payload.currencies||{});
   const currencyContent=currencies.length?currencies.map(series=>bankCashflowCurrencyCard(series,bankCashflowMonth,bankCashflowMonth===payload.as_of.slice(0,7),payload.as_of,selection.current_month_partial||selection.end_month>=payload.as_of.slice(0,7))).join(''):empty('No bank cash flow in this range',`No active tracked bank cash movement is available for ${esc(cashflowMonthLabel(bankCashflowMonth))}. Brokerage and CPF events are excluded.`);

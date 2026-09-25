@@ -81,6 +81,7 @@ assert(dockerfile.includes('activity.css'));
 assert(dockerfile.includes('cashflow.js'));
 
 const cashflowFixture={currency:'SGD',months:[{month:'2026-09',inflow:'1200.00',outflow:'350.00',net:'850.00',internal_transfer_in:'500.00',internal_transfer_out:'500.00',by_kind:[{kind:'deposit',inflow:'1200.00',outflow:'0',internal_transfer_in:'0',internal_transfer_out:'0',transactions:[{id:'tx-correction',date:'2026-09-02',account:'bank-1',account_name:'Everyday account',amount:'1200.00',description:'Salary'}]},{kind:'transfer',inflow:'0',outflow:'0',internal_transfer_in:'500.00',internal_transfer_out:'500.00',transactions:[{id:'tx-transfer',date:'2026-09-03',account:'bank-1',account_name:'Everyday account',amount:'500.00',direction:'out'},{id:'tx-transfer',date:'2026-09-03',account:'bank-2',account_name:'Savings',amount:'500.00',direction:'in'}]}],by_account:[{account:'bank-1',account_name:'Everyday account',inflow:'1200.00',outflow:'350.00',internal_transfer_in:'0',internal_transfer_out:'500.00',transactions:[{id:'tx-correction',kind:'deposit',date:'2026-09-02',amount:'1200.00'},{id:'tx-transfer',kind:'transfer',date:'2026-09-03',amount:'500.00',direction:'out'}]}]}]};
+cashflowFixture.months.unshift({month:'2026-08',inflow:'0',outflow:'0',net:'0',internal_transfer_in:'0',internal_transfer_out:'0',by_kind:[],by_account:[]});
 context.cashflowTestData=cashflowFixture;
 const cashflowHtml=vm.runInContext("bankCashflowCurrencyCard(cashflowTestData,'2026-09',true,'2026-09-25',true)",context);
 assert(cashflowHtml.includes('SGD 1,200.00'));
@@ -91,7 +92,11 @@ assert(cashflowHtml.includes('data-action="cashflow-month" data-month="2026-09"'
 assert(cashflowHtml.includes('Internal bank transfers are excluded from net cash movement'));
 assert(cashflowHtml.includes('data-action="cashflow-event" data-id="tx-transfer"'));
 assert(vm.runInContext('bankCashflowPage()',context).includes('Brokerage and CPF activity are excluded'));
-assert.deepEqual(Array.from(vm.runInContext("cashflowAvailableMonths({as_of:'2026-09-25',currencies:{SGD:cashflowTestData}})",context)),['2026-09']);
+assert.deepEqual(Array.from(vm.runInContext("cashflowAvailableMonths({as_of:'2026-09-25',currencies:{SGD:cashflowTestData}})",context)),['2026-08','2026-09']);
+const monthlyOverview=vm.runInContext("cashflowMonthlyOverview(cashflowTestData,'2026-09','2026-09-25',true)",context);
+assert(monthlyOverview.indexOf('September 2026')<monthlyOverview.indexOf('August 2026'),'newest cash-flow month appears first');
+const drilldown=vm.runInContext("cashflowTransactionButtons([{id:'older',date:'2026-08-01',amount:'1'},{id:'newer',date:'2026-09-01',amount:'2'}])",context);
+assert(drilldown.indexOf('2026-09-01')<drilldown.indexOf('2026-08-01'),'newest cash-flow transaction appears first');
 fixture.as_of='2026-09-25';
 const usdFixture={currency:'USD',months:[{month:'2026-09',inflow:'4.25',outflow:'0',net:'4.25',internal_transfer_in:'0',internal_transfer_out:'0',by_kind:[],by_account:[]}]};
 context.cashflowPayload={as_of:'2026-09-25',selection:{type:'last_12_months',year:null,start_month:'2025-10',end_month:'2026-09',current_month_partial:true},currencies:{SGD:cashflowFixture,USD:usdFixture}};
