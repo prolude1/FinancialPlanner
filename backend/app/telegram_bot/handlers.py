@@ -1,14 +1,14 @@
 """Telegram command definitions, formatting, and guided conversation state."""
 import os
 import re
+import secrets
 import time
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 from ..core import store
 
 FIELDS = {
-    "stock": [("query", "Enter a ticker or company/security name.")],
     "futurevalue": [("initial_value", "Starting amount?"), ("cashflow", "Recurring contribution (use a negative number for withdrawals)?"),
                     ("cashflow_frequency", "Contribution frequency?"), ("annual_rate", "Expected annual return, in percent?"),
                     ("duration_years", "Duration in whole years?"), ("compounding_frequency", "Compounding frequency?"),
@@ -46,25 +46,24 @@ FIELDS["opening_holding"] = [(k, "Original unit cost, or unknown?" if k == "pric
 FIELDS["split"] = TRADE[:5] + [("ratio", "New shares per old share, e.g. 4 for a 4-for-1 split?"), ("date", "Split effective date (YYYY-MM-DD)?")]
 ACCOUNT_TYPE_ORDER = ("bank", "brokerage", "cpf")
 ACCOUNT_TYPE_LABELS = {"bank": "Bank accounts", "brokerage": "Brokerage accounts", "cpf": "CPF accounts"}
-COMMAND_DESCRIPTIONS = {
-    "start": "Open the private financial ledger",
-    "help": "Show every available command",
-    "account": "Account actions and balances",
-    "creditcard": "Credit-card actions and balances",
-    "deposit": "Record money entering an account",
-    "withdraw": "Record spending or money leaving",
-    "transfer": "Move money between accounts",
-    "cpf_set": "Reconcile a CPF statement balance",
-    "purchase": "Record a credit-card purchase",
-    "payment": "Pay a credit-card balance",
-    "calculator": "Open financial calculators",
-    "stock": "Look up prices and financials",
-    "cancel": "Cancel the current operation",
-    "buy": "Buy shares or ETFs",
-    "sell": "Sell shares or ETFs",
-    "opening_holding": "Record an existing holding",
-    "split": "Record a stock split",
-}
+TOP_LEVEL_COMMANDS = (
+    ("deposit", "Record money entering an account"),
+    ("withdraw", "Record spending or money leaving"),
+    ("purchase", "Record a credit-card purchase"),
+    ("payment", "Pay a credit-card balance"),
+    ("buy", "Buy shares or ETFs"),
+    ("sell", "Sell shares or ETFs"),
+    ("transfer", "Move money between accounts"),
+    ("cpf_set", "Reconcile a CPF statement balance"),
+    ("account", "Account actions and balances"),
+    ("creditcard", "Credit-card actions and balances"),
+    ("calculator", "Open financial calculators"),
+    ("opening_holding", "Record an existing holding"),
+    ("split", "Record a stock split"),
+    ("help", "Show every available command"),
+    ("start", "Open the private financial ledger"),
+    ("cancel", "Cancel the current operation"),
+)
 
 ACCOUNT_ACTIONS = [
     ("accounts", "List accounts"), ("account_view", "View account"),
@@ -84,7 +83,13 @@ COMMAND_ALIASES = {"purchase": "credit_purchase", "payment": "credit_payment"}
 
 def telegram_commands():
     return [{"command": command, "description": description}
-            for command, description in COMMAND_DESCRIPTIONS.items()]
+            for command, description in TOP_LEVEL_COMMANDS]
+
+
+def top_level_command_text():
+    commands = ["/" + command for command, _ in TOP_LEVEL_COMMANDS]
+    return "\n".join(" · ".join(commands[start:start + 4])
+                     for start in range(0, len(commands), 4))
 
 
 def configure_command_menu(client, base, owner):
@@ -138,72 +143,6 @@ def yearly_breakdown(result):
         for row in rows)
 
 
-def valid_security_id(value):
-    return bool(re.fullmatch(r"(?:NASDAQ|NYSE|LSE|SGX):[A-Z0-9.^-]{1,20}", str(value)))
-
-
-def metric(value):
-    return "-" if value is None else format_amount(value)
-
-
-def cache_note(payload):
-    cache = payload.get("cache") or {}
-    return "\n⚠ Cached/stale data." if cache.get("stale") else ""
-
-
-def format_stock_price(overview):
-    security, price = overview["security"], overview["latest_price"]
-    change_text = "-"
-    if price.get("change") is not None:
-        change = Decimal(price["change"])
-        percent = Decimal(price["change_percent"]) if price.get("change_percent") is not None else None
-        change_text = f"{change:+,.2f}" + (f" ({percent:+,.2f}%)" if percent is not None else "")
-    return (f"{security['name']} ({security['exchange']}:{security['symbol']})\n"
-            f"Latest completed-session close: {price['currency']} {metric(price.get('close'))}\n"
-            f"Change vs prior session: {change_text}\n"
-            f"Session date: {price.get('session_date') or '-'}\n"
-            f"As of: {price.get('data_timestamp') or price.get('retrieved_at') or '-'}"
-            + cache_note(overview))
-
-
-def format_earnings(earnings):
-    return (f"Latest earnings/report ({earnings.get('period_type') or '-'})\n"
-            f"Period end: {earnings.get('period_end') or '-'}\n"
-            f"Report/filing date: {earnings.get('report_date') or '-'}\n"
-            f"Currency: {earnings.get('currency') or '-'}\n"
-            f"Revenue: {metric(earnings.get('revenue'))}\n"
-            f"Free cash flow: {metric(earnings.get('free_cash_flow'))}\n"
-            f"Profit after tax/net income: {metric(earnings.get('profit_after_tax'))}\n"
-            f"EBITDA: {metric(earnings.get('ebitda'))}\n"
-            f"EBITA: {metric(earnings.get('ebita'))}" + cache_note(earnings))
-
-
-def format_financials(financials):
-    lines = [f"5-year financials · {financials.get('currency') or '-'}"]
-    for row in financials.get("fiscal_years", []):
-        lines.extend([f"\n{row.get('fiscal_year', '-')} · period end {row.get('period_end') or '-'}",
-                      f"Report date: {row.get('report_date') or '-'}",
-                      f"Revenue: {metric(row.get('revenue'))}",
-                      f"Free cash flow: {metric(row.get('free_cash_flow'))}",
-                      f"Profit after tax/net income: {metric(row.get('profit_after_tax'))}",
-                      f"EBITDA: {metric(row.get('ebitda'))}",
-                      f"EBITA: {metric(row.get('ebita'))}"])
-    coverage = financials.get("coverage") or {}
-    if not coverage.get("complete", True):
-        lines.append(f"\n⚠ Coverage incomplete: {coverage.get('returned_years', 0)} of {coverage.get('requested_years', 5)} years available.")
-    return "\n".join(lines) + cache_note(financials)
-
-
-def stock_keyboard(security_id):
-    return {"inline_keyboard": [
-        [{"text": "Latest price", "callback_data": "stock:price:" + security_id},
-         {"text": "Latest earnings", "callback_data": "stock:earnings:" + security_id}],
-        [{"text": "5-year financials", "callback_data": "stock:financials:" + security_id}],
-        [{"text": "Change stock", "callback_data": "cmd:stock"},
-         {"text": "Refresh", "callback_data": "stock:refresh:" + security_id}],
-    ]}
-
-
 def eligible_accounts(session, state):
     field = FIELDS[session["command"]][session["index"]][0]
     if field in ("cashflow_frequency", "compounding_frequency"):
@@ -225,6 +164,44 @@ def eligible_accounts(session, state):
     return sorted(accounts, key=lambda a: (ACCOUNT_TYPE_ORDER.index(a["type"]), a["name"].casefold()))
 
 
+def today_in_app_timezone():
+    return datetime.now(ZoneInfo(os.environ.get("APP_TIMEZONE", "Asia/Singapore"))).date()
+
+
+def valid_transaction_date(value, today=None):
+    """Accept only a real YYYY-MM-DD date within the ledger's supported range."""
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(value)):
+        return False
+    try:
+        parsed = date.fromisoformat(value)
+    except ValueError:
+        return False
+    return date(1970, 1, 1) <= parsed <= (today or today_in_app_timezone())
+
+
+def date_step(session):
+    return bool(session and session.get("index", 0) < len(FIELDS.get(session.get("command"), []))
+                and FIELDS[session["command"]][session["index"]][0] == "date")
+
+
+def date_retry(session, today, state):
+    """Count invalid date submissions and return the user-facing retry/cancel reply."""
+    attempts = int(session.get("date_attempts", 0)) + 1
+    if attempts >= 3:
+        return None, "Invalid date. This transaction was cancelled after 3 attempts. Nothing was saved."
+    session["date_attempts"] = attempts
+    message = (f"Enter a real date from 1970-01-01 through {today} in exact YYYY-MM-DD format. "
+               f"Attempt {attempts} of 3 was invalid; {3 - attempts} attempt(s) remain.\n"
+               + prompt(session, state))
+    return session, message
+
+
+def date_keyboard(session):
+    nonce = session.setdefault("nonce", secrets.token_hex(4))
+    return {"inline_keyboard": [[{"text": "Today",
+                                  "callback_data": "date:today:" + nonce}]]}
+
+
 def session_keyboard(session, state):
     if not session:
         return None
@@ -234,6 +211,8 @@ def session_keyboard(session, state):
             {"text": "No, cancel", "callback_data": "cancel"},
         ]]}
     field = FIELDS[session["command"]][session["index"]][0]
+    if field == "date":
+        return date_keyboard(session)
     if field in ("account", "destination", "funding_account"):
         rows = [[{"text": account["name"], "callback_data": "value:" + account["id"]}]
                 for account in eligible_accounts(session, state)]
@@ -273,6 +252,8 @@ def grouped_accounts(accounts, render):
 def prompt(session, state):
     """Return the current question, adding copyable account references where useful."""
     field, question = FIELDS[session["command"]][session["index"]]
+    if field == "date":
+        return "Date (YYYY-MM-DD). You can also type today or tap Today."
     if field == "credit_account":
         items = sorted(state.get("credit_accounts", {}).values(), key=lambda a: a["name"].casefold())
         if not items:
@@ -330,7 +311,7 @@ def authorized(update, owner):
                 msg.get("chat", {}).get("type") == "private" and msg.get("chat", {}).get("id") == owner)
 
 
-def handle(update, owner, query, mutate, resolve_instrument=None, calculate=None, stocks=None):
+def handle(update, owner, query, mutate, resolve_instrument=None, calculate=None):
     if not authorized(update, owner):
         return None
     text = update["message"].get("text", "").strip()
@@ -340,26 +321,50 @@ def handle(update, owner, query, mutate, resolve_instrument=None, calculate=None
         return None
     session = state["bot"]["session"]
     retired_commands = {"history", "correct", "void"}
+    retired_stock_commands = {"stock", "stock_show", "stock_price", "stock_earnings",
+                              "stock_financials", "stock_refresh"}
     legacy_edit_session = bool(session and session.get("command") in {"correct", "void"})
+    legacy_stock_session = bool(session and session.get("command") == "stock")
     if legacy_edit_session:
         # Persisted conversation state can outlive a bot restart. Never let a
         # post-upgrade reply finish an edit workflow removed from Telegram.
         session = None
+    elif legacy_stock_session:
+        # A persisted lookup session predates removal of Telegram stock viewing.
+        session = None
     if session and time.time() - session["started"] > 1800:
         session = None
+    callback_data = update.get("callback_query", {}).get("data", "")
+    today_callback = callback_data.startswith("date:today:")
+    if today_callback:
+        callback_nonce = callback_data.partition("date:today:")[2]
+        if not date_step(session) or callback_nonce != session.get("nonce"):
+            result = "That Today button has expired. No changes were made."
+            with store.transaction() as s:
+                s["bot"]["session"] = session
+                s["bot"]["offset"] = uid + 1
+                s["bot"]["pending_reply"] = result
+                s["bot"]["pending_markup"] = session_keyboard(session, state)
+            return result
+        text = "today"
     result = "Use /help for available commands."
     pending_markup = None
     calculator_result = None
-    last_stock = None
     command = text.split(" ", 1)[0].split("@", 1)[0].lstrip("/").lower()
     command = COMMAND_ALIASES.get(command, command)
     if legacy_edit_session:
         result = "This older Telegram edit was cancelled without changes. View and edit transactions in the web app."
+    elif legacy_stock_session:
+        result = "Telegram stock lookups are no longer available. Use the web dashboard."
     elif text.startswith("/") and command in retired_commands:
         result = "Transaction history and edits are handled in the web app. No changes were made."
+    elif text.startswith("/") and command in retired_stock_commands:
+        result = "Telegram stock lookups are no longer available. Use the web dashboard."
     elif text.startswith("/"):
         if command in ("start", "help"):
-            result = "Your private financial ledger.\n/account · /creditcard · /calculator\n/deposit · /withdraw · /transfer · /cpf_set\n/purchase · /payment\n/buy · /sell · /opening_holding · /split · /cancel\nView or edit transactions in the local web app. Loans are managed there too."
+            result = ("Your private financial ledger.\nAvailable commands:\n"
+                      + top_level_command_text()
+                      + "\nView or edit transactions in the local web app. Loans are managed there too.")
         elif command == "cancel":
             session, result = None, "Cancelled. Nothing saved."
         elif command == "creditcard":
@@ -385,26 +390,6 @@ def handle(update, owner, query, mutate, resolve_instrument=None, calculate=None
             session = None
             calculator_result = state["bot"].get("last_tvm")
             result = yearly_breakdown(calculator_result) if calculator_result else "No recent calculation found."
-        elif command in ("stock_show", "stock_price", "stock_earnings", "stock_financials", "stock_refresh"):
-            session = None
-            security_id = text.partition(" ")[2].strip().upper()
-            if not valid_security_id(security_id):
-                result = "This stock selection is invalid or expired. Use /stock to search again."
-            elif stocks is None:
-                result = "Stock service is unavailable. Please try again later."
-            else:
-                last_stock = security_id
-                if command in ("stock_show", "stock_refresh"):
-                    overview = stocks("overview", security_id)
-                    earnings = stocks("earnings", security_id)
-                    result = format_stock_price(overview) + "\n\n" + format_earnings(earnings)
-                elif command == "stock_price":
-                    result = format_stock_price(stocks("overview", security_id))
-                elif command == "stock_earnings":
-                    result = format_earnings(stocks("earnings", security_id))
-                else:
-                    result = format_financials(stocks("financials", security_id))
-                pending_markup = stock_keyboard(security_id)
         elif command in ("accounts", "credit_accounts", "account"):
             data = query()
             if command == "accounts":
@@ -437,14 +422,27 @@ def handle(update, owner, query, mutate, resolve_instrument=None, calculate=None
                 result = "Saved. Reference: " + str(saved.get("id", "ok")) + ". The dashboard will refresh automatically."
                 session = None
         elif command in FIELDS:
-            session = {"command": command, "data": {}, "index": 0, "started": time.time()}
+            session = {"command": command, "data": {}, "index": 0, "started": time.time(),
+                       "nonce": secrets.token_hex(4)}
             result = prompt(session, state)
     elif session and session["index"] < len(FIELDS[session["command"]]):
         field = FIELDS[session["command"]][session["index"]][0]
         instrument_note = ""
         instrument_shortcut = None
-        if field == "date" and text.lower() == "today":
-            text = str(datetime.now(ZoneInfo(os.environ.get("APP_TIMEZONE", "Asia/Singapore"))).date())
+        if field == "date":
+            today = today_in_app_timezone()
+            candidate = str(today) if text.lower() == "today" else text
+            if not valid_transaction_date(candidate, today):
+                session, result = date_retry(session, today, state)
+                markup = session_keyboard(session, state)
+                with store.transaction() as s:
+                    s["bot"]["session"] = session
+                    s["bot"]["offset"] = uid + 1
+                    s["bot"]["pending_reply"] = result
+                    s["bot"]["pending_markup"] = markup
+                return result
+            text = candidate
+            session["date_attempts"] = 0
         if session["command"] == "account_add" and field == "type":
             account_types = {
                 "bank": "bank", "bank account": "bank",
@@ -598,18 +596,6 @@ def handle(update, owner, query, mutate, resolve_instrument=None, calculate=None
                 session["index"] += 1
         if session["index"] < len(FIELDS[session["command"]]):
             result = instrument_note + prompt(session, state)
-        elif session["command"] == "stock":
-            matches = stocks("search", session["data"]["query"]) if stocks else {"results": []}
-            rows = matches.get("results", [])
-            session = None
-            if not rows:
-                result = "No matching securities found. Use /stock to try another ticker or company name."
-            else:
-                result = "Choose one security. Tickers on different exchanges are kept separate:"
-                pending_markup = {"inline_keyboard": [[{
-                    "text": f"{row['name']} · {row['exchange']}:{row['symbol']}",
-                    "callback_data": "stock:show:" + row["security_id"]}]
-                    for row in rows if valid_security_id(row.get("security_id"))]}
         elif session["command"] in ("futurevalue", "presentvalue"):
             if calculate is None:
                 result = "Calculator service is unavailable. Please try again later."
@@ -634,6 +620,4 @@ def handle(update, owner, query, mutate, resolve_instrument=None, calculate=None
         s["bot"]["pending_markup"] = pending_markup or session_keyboard(session, state)
         if calculator_result is not None:
             s["bot"]["last_tvm"] = calculator_result
-        if last_stock is not None:
-            s["bot"]["last_stock"] = last_stock
     return result

@@ -2,6 +2,7 @@ import hashlib
 import os
 import uuid
 import warnings
+from datetime import timedelta
 from copy import deepcopy
 from unittest.mock import Mock
 import pytest
@@ -18,6 +19,7 @@ assert not any("Using httpx with starlette.testclient is deprecated" in str(warn
 from app.core import store
 from app.api_server import main as api
 from app.telegram_bot import handlers as bot
+from app.telegram_bot.client import callback_message
 from app.core.domain import empty
 
 
@@ -203,7 +205,7 @@ def test_telegram_bank_withdrawal_collects_description(client):
     replies = [bot.handle(update(uid, text), owner, lambda: {}, mutate)
                for uid, text in enumerate(["/withdraw", account_id, "SGD 12.50", "Lunch", "today"], 220)]
     assert replies[2] == "Description, e.g. groceries or utilities?"
-    assert replies[3] == "Date (YYYY-MM-DD or today)?"
+    assert "tap Today" in replies[3]
     bot.handle(update(225, "/confirm"), owner, lambda: {}, mutate)
     assert saved[-1][1]["description"] == "Lunch"
     assert saved[-1][1]["currency"] == "SGD"
@@ -233,13 +235,110 @@ def test_telegram_money_input_retries_and_transfer_collects_both_sides(client):
     assert "received" in bot.handle(update(304, "sgd 135"), owner, lambda: {}, mutate).lower()
     retry = bot.handle(update(305, "USD"), owner, lambda: {}, mutate)
     assert "Please retry" in retry
-    assert "Transfer date" in bot.handle(update(306, "USD 100"), owner, lambda: {}, mutate)
+    assert "YYYY-MM-DD" in bot.handle(update(306, "USD 100"), owner, lambda: {}, mutate)
     assert "/confirm" in bot.handle(update(307, "today"), owner, lambda: {}, mutate)
     bot.handle(update(308, "/confirm"), owner, lambda: {}, mutate)
     payload = saved[-1][1]
     assert {key: payload[key] for key in ("account", "destination", "currency", "amount", "to_currency", "received")} == {
         "account": source, "destination": destination, "currency": "SGD", "amount": "135",
         "to_currency": "USD", "received": "100"}
+
+
+def test_telegram_date_button_and_validation_are_shared_across_transaction_types(client):
+    owner = 733
+    commands = {
+        "deposit": {"account": "a", "currency": "SGD", "amount": "5", "description": "test"},
+        "buy": {"account": "a", "exchange": "NASDAQ", "symbol": "AAPL", "asset_class": "equity",
+                "currency": "USD", "quantity": "1", "price": "5"},
+        "credit_purchase": {"card": "card", "description": "test", "amount": "5"},
+    }
+    for command, data in commands.items():
+        session = {"command": command, "data": data, "index": len(bot.FIELDS[command]) - 1,
+                   "started": 1, "nonce": "test1234"}
+        assert bot.session_keyboard(session, {}) == {"inline_keyboard": [[
+            {"text": "Today", "callback_data": "date:today:test1234"}]]}
+
+    owner, account_id = 733, "1111111111"
+    with store.transaction() as state:
+        state["accounts"][account_id] = {"id": account_id, "name": "Bank", "type": "bank",
+            "currency": "SGD", "cpf_type": "", "archived": False}
+    def update(uid, text):
+        return {"update_id": uid, "message": {"from": {"id": owner},
+                "chat": {"id": owner, "type": "private"}, "text": text}}
+    saved = []
+    mutate = lambda *args: saved.append(args) or {"id": "saved"}
+    bot.handle(update(740, "/deposit"), owner, lambda: {}, mutate)
+    bot.handle(update(741, account_id), owner, lambda: {}, mutate)
+    bot.handle(update(742, "SGD 5"), owner, lambda: {}, mutate)
+    bot.handle(update(743, "Test"), owner, lambda: {}, mutate)
+    button_data = store.read()["bot"]["pending_markup"]["inline_keyboard"][0][0]["callback_data"]
+    assert button_data.startswith("date:today:")
+
+    callback = {"update_id": 744, "callback_query": {"id": "date-click", "data": button_data,
+        "from": {"id": owner}, "message": {"chat": {"id": owner, "type": "private"}}}}
+    class Telegram:
+        def post(self, *args, **kwargs):
+            return Mock(raise_for_status=lambda: None)
+    callback_message(callback, Telegram(), "https://telegram.invalid/")
+    bot.handle(callback, owner, lambda: {}, mutate)
+    assert "/confirm" in store.read()["bot"]["pending_reply"]
+    assert store.read()["bot"]["session"]["data"]["date"] == str(bot.today_in_app_timezone())
+    bot.handle(update(745, "/cancel"), owner, lambda: {}, mutate)
+    assert saved == []
+
+
+def test_telegram_date_retries_cancel_and_valid_date_resets_count(client):
+    owner, account_id = 734, "2222222222"
+    assert bot.valid_transaction_date("2024-02-29")
+    assert not bot.valid_transaction_date("2026-2-01")
+    assert not bot.valid_transaction_date("2023-02-29")
+    assert not bot.valid_transaction_date("1969-12-31")
+    with store.transaction() as state:
+        state["accounts"][account_id] = {"id": account_id, "name": "Bank", "type": "bank",
+            "currency": "SGD", "cpf_type": "", "archived": False}
+        state["bot"]["session"] = {"command": "deposit", "data": {"account": account_id,
+            "currency": "SGD", "amount": "5", "description": "test"}, "index": 3, "started": 9999999999}
+    def update(uid, text):
+        return {"update_id": uid, "message": {"from": {"id": owner},
+                "chat": {"id": owner, "type": "private"}, "text": text}}
+    saved = []
+    mutate = lambda *args: saved.append(args) or {"id": "saved"}
+    for uid, invalid in ((750, "1969-12-31"), (751, "2025-02-29")):
+        reply = bot.handle(update(uid, invalid), owner, lambda: {}, mutate)
+        assert "attempt(s) remain" in reply
+        assert store.read()["bot"]["session"]["index"] == 3
+    future = str(bot.today_in_app_timezone() + timedelta(days=1))
+    reply = bot.handle(update(752, future), owner, lambda: {}, mutate)
+    assert "cancelled after 3 attempts" in reply
+    assert store.read()["bot"]["session"] is None
+    assert store.read()["bot"]["pending_markup"] is None
+    assert saved == []
+
+    with store.transaction() as state:
+        state["bot"]["offset"] = 753
+        state["bot"]["session"] = {"command": "deposit", "data": {"account": account_id,
+            "currency": "SGD", "amount": "5", "description": "test"}, "index": 3,
+            "date_attempts": 2, "started": 9999999999}
+    reply = bot.handle(update(753, "2024-02-29"), owner, lambda: {}, mutate)
+    assert "/confirm" in reply
+    assert store.read()["bot"]["session"]["date_attempts"] == 0
+    assert store.read()["bot"]["session"]["data"]["date"] == "2024-02-29"
+
+
+def test_telegram_stale_today_callback_does_not_change_session(client):
+    owner = 735
+    session = {"command": "deposit", "data": {"account": "2222222222", "currency": "SGD",
+        "amount": "5", "description": "test"}, "index": 3, "started": 9999999999,
+               "nonce": "new12345"}
+    with store.transaction() as state:
+        state["bot"]["session"] = session
+    callback = {"update_id": 760, "callback_query": {"id": "stale", "data": "date:today:old12345",
+        "from": {"id": owner}, "message": {"chat": {"id": owner, "type": "private"}}},
+        "message": {"from": {"id": owner}, "chat": {"id": owner, "type": "private"}, "text": "today"}}
+    saved = []
+    reply = bot.handle(callback, owner, lambda: {}, lambda *args: saved.append(args))
+    assert "expired" in reply and saved == []
+    assert store.read()["bot"]["session"] == session
 
 
 def test_telegram_account_currency_is_limited_to_sgd_and_usd(client):
@@ -359,15 +458,40 @@ def test_trade_accepts_exchange_colon_ticker_shortcut(client):
     assert saved[-1][1]["exchange"] == "NYSE" and saved[-1][1]["symbol"] == "VOO"
 
 
-def test_telegram_command_menu_keeps_top_level_choices_compact():
+def test_telegram_command_menu_keeps_top_level_choices_compact(client):
     commands = bot.telegram_commands()
     names = {item["command"] for item in commands}
     assert {"start", "help", "account", "creditcard", "deposit", "withdraw",
             "transfer", "cpf_set", "purchase", "payment", "buy", "sell", "opening_holding",
-            "split", "cancel", "calculator", "stock"} == names
+            "split", "cancel", "calculator"} == names
+    assert "stock" not in names
     assert not ({"account_add", "credit_purchase", "confirm"} & names)
     assert not ({"history", "correct", "void"} & names)
     assert len(names) == len(commands)
+    expected_order = ["deposit", "withdraw", "purchase", "payment", "buy", "sell", "transfer",
+                      "cpf_set", "account", "creditcard", "calculator", "opening_holding", "split",
+                      "help", "start", "cancel"]
+    assert [item["command"] for item in commands] == expected_order
+
+    class Response:
+        def raise_for_status(self):
+            pass
+    calls = []
+    class TelegramClient:
+        def post(self, url, json):
+            calls.append((url, json))
+            return Response()
+    bot.configure_command_menu(TelegramClient(), "https://telegram.invalid/", 123)
+    assert [item["command"] for item in calls[0][1]["commands"]] == expected_order
+
+    owner = 123
+    update = lambda uid, text: {"update_id": uid, "message": {"from": {"id": owner},
+        "chat": {"id": owner, "type": "private"}, "text": text}}
+    for uid, command in ((1, "/help"), (2, "/start")):
+        reply = bot.handle(update(uid, command), owner, lambda: {}, lambda *_: {})
+        listing = reply.split("Available commands:\n", 1)[1].split("\nView ", 1)[0]
+        listed = [part.strip()[1:] for line in listing.splitlines() for part in line.split(" · ")]
+        assert listed == expected_order
 
 
 def test_retired_telegram_history_and_edit_commands_redirect_without_mutation(client):
@@ -481,44 +605,6 @@ def test_financial_calculator_menu_groups_pv_and_fv(client):
         {"text": "Future value", "callback_data": "cmd:futurevalue"},
         {"text": "Present value", "callback_data": "cmd:presentvalue"},
     ]
-
-
-def test_stock_search_preserves_exchange_ambiguity_in_callbacks(client):
-    owner = 923
-    update = lambda uid, text: {"update_id": uid, "message": {"from": {"id": owner},
-        "chat": {"id": owner, "type": "private"}, "text": text}}
-    search = lambda action, value: {"results": [
-        {"security_id": "NASDAQ:ABC", "symbol": "ABC", "exchange": "NASDAQ", "name": "Alpha"},
-        {"security_id": "NYSE:ABC", "symbol": "ABC", "exchange": "NYSE", "name": "Another"},
-    ]}
-    assert bot.handle(update(960, "/stock"), owner, lambda: {}, lambda *_: {}, stocks=search).startswith("Enter")
-    bot.handle(update(961, "ABC"), owner, lambda: {}, lambda *_: {}, stocks=search)
-    buttons = [row[0] for row in store.read()["bot"]["pending_markup"]["inline_keyboard"]]
-    assert [button["callback_data"] for button in buttons] == [
-        "stock:show:NASDAQ:ABC", "stock:show:NYSE:ABC"]
-
-
-def test_stock_formatting_marks_missing_metrics_stale_and_completed_change():
-    overview = {"security": {"name": "Alpha", "exchange": "NASDAQ", "symbol": "ABC"},
-        "latest_price": {"currency": "USD", "close": "11", "session_date": "2026-09-23",
-                         "prior_close": "10", "change": "1", "change_percent": "10",
-                         "data_timestamp": "2026-09-23T20:00:00Z"},
-        "cache": {"stale": True}}
-    price = bot.format_stock_price(overview)
-    assert "Session date: 2026-09-23" in price
-    assert "+1.00 (+10.00%)" in price and "Cached/stale" in price
-    earnings = bot.format_earnings({"period_type": "quarterly", "period_end": "2026-06-30",
-        "report_date": None, "currency": "USD", "revenue": None, "free_cash_flow": None,
-        "profit_after_tax": None, "ebitda": None, "ebita": None, "cache": {}})
-    assert "Report/filing date: -" in earnings
-    assert "Revenue: -" in earnings and "EBITA: -" in earnings
-
-
-def test_stock_callback_security_id_validation():
-    assert bot.valid_security_id("SGX:D05")
-    assert bot.valid_security_id("LSE:VWRA")
-    assert not bot.valid_security_id("D05")
-    assert not bot.valid_security_id("NASDAQ:AAPL:evil")
 
 
 def test_telegram_command_menu_is_scoped_to_owner_chat():

@@ -7,7 +7,7 @@ from urllib.parse import quote
 import httpx
 
 from ..core import store
-from .handlers import code_entities, configure_command_menu, handle, valid_security_id
+from .handlers import code_entities, configure_command_menu, handle
 
 
 class BackendClient:
@@ -32,27 +32,11 @@ class BackendClient:
         response.raise_for_status()
         return response.json()
 
-    def stocks(self, action, value):
-        if action == "search":
-            response = self.client.get("/api/stocks/search", params={"q": value})
-        else:
-            encoded = quote(value, safe="")
-            endpoints = {
-                "overview": f"/api/stocks/{encoded}/overview",
-                "candles": f"/api/stocks/{encoded}/candles",
-                "earnings": f"/api/stocks/{encoded}/earnings/latest",
-                "financials": f"/api/stocks/{encoded}/financials",
-                "identity": f"/api/stocks/{encoded}/identity",
-            }
-            response = self.client.get(endpoints[action], params={
-                **({"range": "1y", "interval": "1d"} if action == "candles" else {}),
-                **({"years": 5} if action == "financials" else {}),
-            })
+    def resolve_instrument(self, exchange, symbol):
+        security_id = quote(f"{exchange}:{symbol}", safe="")
+        response = self.client.get(f"/api/stocks/{security_id}/identity", params={})
         response.raise_for_status()
         return response.json()
-
-    def resolve_instrument(self, exchange, symbol):
-        return self.stocks("identity", f"{exchange}:{symbol}")
 
 
 def callback_message(update, telegram_client, base):
@@ -69,15 +53,10 @@ def callback_message(update, telegram_client, base):
         callback_text = "/account " + data[5:]
     elif data.startswith("card:"):
         callback_text = data[5:]
+    elif data.startswith("date:today:"):
+        callback_text = "today"
     elif data == "tvm:breakdown":
         callback_text = "/tvm_breakdown"
-    elif data.startswith("stock:"):
-        parts = data.split(":", 2)
-        if (len(parts) == 3 and parts[1] in {"show", "price", "earnings", "financials", "refresh"}
-                and valid_security_id(parts[2])):
-            callback_text = f"/stock_{parts[1]} {parts[2]}"
-        else:
-            callback_text = "/stock"
     elif data in ("confirm", "cancel"):
         callback_text = "/" + data
     else:
@@ -88,7 +67,6 @@ def callback_message(update, telegram_client, base):
     answered = telegram_client.post(base + "answerCallbackQuery", json={
         "callback_query_id": callback["id"]})
     answered.raise_for_status()
-    return callback
 
 
 def main():
@@ -134,11 +112,10 @@ def main():
                                      "allowed_updates": ["message", "callback_query"]})
             response.raise_for_status()
             for update in response.json().get("result", []):
-                callback = None
                 try:
-                    callback = callback_message(update, telegram, base)
+                    callback_message(update, telegram, base)
                     result = handle(update, owner, backend.dashboard, backend.mutate,
-                                    backend.resolve_instrument, backend.calculate, backend.stocks)
+                                    backend.resolve_instrument, backend.calculate)
                 except httpx.HTTPStatusError as exc:
                     if exc.response.status_code == 422:
                         detail = exc.response.json().get("detail", "Invalid input")
@@ -147,19 +124,7 @@ def main():
                         with store.transaction() as state:
                             state["bot"]["pending_reply"] = result
                     else:
-                        active = store.read()["bot"].get("session")
-                        if not (update.get("message", {}).get("text", "").startswith("/stock")
-                                or (callback and callback.get("data", "").startswith("stock:"))
-                                or (active and active.get("command") == "stock")):
-                            raise
-                        try:
-                            detail = exc.response.json().get("detail", {})
-                            message = detail.get("message") if isinstance(detail, dict) else str(detail)
-                        except Exception:
-                            message = "Provider temporarily unavailable"
-                        result = "Stock data unavailable: " + (message or "Please try again later.")
-                        with store.transaction() as state:
-                            state["bot"]["pending_reply"] = result
+                        raise
                 if result:
                     flush_reply()
                 with store.transaction() as state:
