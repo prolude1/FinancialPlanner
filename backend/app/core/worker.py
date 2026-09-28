@@ -144,12 +144,12 @@ def build_portfolio_history(snapshot, quotes, rates, today):
     return rows
 
 
-def refresh_portfolio_history():
-    snapshot = store.read()
+def refresh_portfolio_history(principal=None):
+    snapshot = store.read() if principal is None else store.read_for(principal)
     today = datetime.now(ZoneInfo(os.environ.get("APP_TIMEZONE", "Asia/Singapore"))).date()
     events = active_events(snapshot, today)
     if not events:
-        store.replace_portfolio_history([])
+        store.replace_portfolio_history([], principal=principal)
         return 0
     start = min(datetime.fromisoformat(e["date"]).date() for e in events) - timedelta(days=7)
     instrument_rows = {}
@@ -179,12 +179,25 @@ def refresh_portfolio_history():
             logging.warning("Historical FX refresh failed for %s/SGD", cur)
             raise
     rows = build_portfolio_history(snapshot, quotes, rates, today)
-    store.replace_portfolio_history(rows)
+    store.replace_portfolio_history(rows, principal=principal)
     return len(rows)
 
 
-def refresh():
-    snapshot = store.read()
+def refresh_all_portfolio_history():
+    """Refresh each financial history independently; never combine tenant events."""
+    counts = []
+    for principal in store.tenant_principals():
+        counts.append(refresh_portfolio_history(principal))
+    try:
+        store.assert_legacy_unclaimed()
+    except PermissionError:
+        return sum(counts)
+    counts.append(refresh_portfolio_history())
+    return sum(counts)
+
+
+def refresh(principal=None):
+    snapshot = store.read() if principal is None else store.read_for(principal)
     today = datetime.now(ZoneInfo(os.environ.get("APP_TIMEZONE", "Asia/Singapore"))).date()
     cash, positions, instruments, *_ = replay(snapshot, today)
     currencies = {cur for (_, cur), amount in cash.items() if amount}
@@ -205,11 +218,26 @@ def refresh():
         except Exception:
             status[cur + "/SGD"] = {"ok": False, "checked_at": datetime.now(timezone.utc).isoformat(),
                                     "message": "FX refresh unavailable; retaining previous rate if any"}
-    with store.transaction() as s:
+    transaction = store.transaction() if principal is None else store.tenant_transaction(principal)
+    with transaction as s:
         s["prices"].update(quotes)
         s["fx"].update(rates)
         s["provider_status"].update(status)
         s["revision"] += 1
+
+
+def refresh_all_ledgers():
+    """Refresh caches/history per ledger; shared market providers are read-only inputs."""
+    for principal in store.tenant_principals():
+        try:
+            refresh(principal)
+        except Exception:
+            logging.warning("Market refresh failed for a tenant; retrying on next cycle")
+    try:
+        store.assert_legacy_unclaimed()
+    except PermissionError:
+        return
+    refresh()
 
 
 def run_due(last_attempt, interval, action, label, now=None):
@@ -236,12 +264,12 @@ def main():
             int(os.environ.get("CATALOG_REFRESH_SECONDS", "86400")),
             refresh_us_catalog, "US catalogue refresh")
         try:
-            refresh()
+            refresh_all_ledgers()
         except Exception:
             logging.warning("Market refresh failed; retrying on next cycle")
         last_history_refresh = run_due(last_history_refresh,
             int(os.environ.get("HISTORY_REFRESH_SECONDS", "21600")),
-            refresh_portfolio_history, "Brokerage history refresh")
+            refresh_all_portfolio_history, "Brokerage history refresh")
         time.sleep(max(60, int(os.environ.get("MARKET_POLL_SECONDS", "900"))))
 
 

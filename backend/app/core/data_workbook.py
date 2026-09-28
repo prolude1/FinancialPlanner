@@ -47,6 +47,8 @@ DESCRIPTIONS = {
     "Stock Cache Data": "Typed tree for each stock_cache.data value. Values are not JSON blobs.",
 }
 _confirmations = {}
+MAX_PENDING_CONFIRMATIONS = 4
+MAX_PENDING_CONFIRMATION_BYTES = 128 * 1024 * 1024
 
 
 class WorkbookError(ValueError):
@@ -225,15 +227,42 @@ def _build_xlsx(snapshot, sample=False):
                     "schema_version": state_row["schema_version"], "sample_data": sample}
 
 
-def snapshot_bytes(c=None):
+def _tenant_workbook_state(data=None):
+    """Preserve workbook schema compatibility without exporting global bot state."""
+    result = store._new_tenant_data(data)
+    result["bot"] = {"offset": 0, "session": None}
+    return result
+
+
+def snapshot_bytes(c=None, principal=None):
     if c is None:
         with store.engine.begin() as conn:
             store.lock_application(conn)
-            return snapshot_bytes(conn)
-    snapshot = {"planner_state": [_db_row(row) for row in c.execute(select(store.state)).mappings().all()],
-        "instrument_catalog": [_db_row(row) for row in c.execute(select(store.instruments)).mappings().all()],
-        "portfolio_history": [_db_row(row) for row in c.execute(select(store.portfolio_history)).mappings().all()],
-        "stock_cache": [_db_row(row) for row in c.execute(select(store.stock_cache)).mappings().all()]}
+            return snapshot_bytes(conn, principal=principal)
+    if principal is None:
+        states = c.execute(select(store.state)).mappings().all()
+        states = [dict(row, data={**row["data"], "bot": store.read_bot_runtime(c)}) for row in states]
+        history = c.execute(select(store.portfolio_history)).mappings().all()
+        catalog = c.execute(select(store.instruments)).mappings().all()
+        cache = c.execute(select(store.stock_cache)).mappings().all()
+    else:
+        row = c.execute(select(store.tenant_ledger).where(store.tenant_ledger.c.principal == principal)).mappings().first()
+        if row is None:
+            state_data = _tenant_workbook_state()
+            states = [{"id": 1, "schema_version": 1, "data": state_data}]
+            history = []
+        else:
+            states = [{"id": 1, "schema_version": row["schema_version"],
+                "data": _tenant_workbook_state(row["data"])}]
+            history = c.execute(select(store.tenant_portfolio_history).where(
+                store.tenant_portfolio_history.c.principal == principal)).mappings().all()
+        # Market catalog and quote cache are shared infrastructure, not part of
+        # a user's restorable financial archive.
+        catalog, cache = [], []
+    snapshot = {"planner_state": [_db_row(row) for row in states],
+        "instrument_catalog": [_db_row(row) for row in catalog],
+        "portfolio_history": [_db_row(row) for row in history],
+        "stock_cache": [_db_row(row) for row in cache]}
     return _build_xlsx(snapshot)
 
 
@@ -607,11 +636,22 @@ def read_workbook(content):
     return info
 
 
-def _current_snapshot(c):
-    return {"planner_state": [_db_row(row) for row in c.execute(select(store.state)).mappings().all()],
-            "instrument_catalog": [_db_row(row) for row in c.execute(select(store.instruments)).mappings().all()],
-            "portfolio_history": [_db_row(row) for row in c.execute(select(store.portfolio_history)).mappings().all()],
-            "stock_cache": [_db_row(row) for row in c.execute(select(store.stock_cache)).mappings().all()]}
+def _current_snapshot(c, principal=None):
+    if principal is None:
+        states = c.execute(select(store.state)).mappings().all()
+        states = [dict(row, data={**row["data"], "bot": store.read_bot_runtime(c)}) for row in states]
+        return {"planner_state": [_db_row(row) for row in states],
+                "instrument_catalog": [_db_row(row) for row in c.execute(select(store.instruments)).mappings().all()],
+                "portfolio_history": [_db_row(row) for row in c.execute(select(store.portfolio_history)).mappings().all()],
+                "stock_cache": [_db_row(row) for row in c.execute(select(store.stock_cache)).mappings().all()]}
+    row = c.execute(select(store.tenant_ledger).where(store.tenant_ledger.c.principal == principal)).mappings().first()
+    state = {"id": 1, "schema_version": 1, "data": _tenant_workbook_state()} if row is None else {
+        "id": 1, "schema_version": row["schema_version"],
+        "data": _tenant_workbook_state(row["data"])}
+    history = c.execute(select(store.tenant_portfolio_history).where(
+        store.tenant_portfolio_history.c.principal == principal)).mappings().all()
+    return {"planner_state": [_db_row(state)], "instrument_catalog": [],
+            "portfolio_history": [_db_row(item) for item in history], "stock_cache": []}
 
 
 def _current_etag(snapshot):
@@ -619,30 +659,49 @@ def _current_etag(snapshot):
     return sha256("".join(sheet + _digest(sheet_rows) for sheet, sheet_rows in rows.items()).encode()).hexdigest()
 
 
-def validate_workbook(content):
+def validate_workbook(content, principal=None):
     workbook = read_workbook(content)
     tables = workbook["tables"]
     with store.engine.begin() as c:
         store.lock_application(c)
-        current = c.execute(select(store.state).where(store.state.c.id == 1)).mappings().one()
+        current_snapshot = _current_snapshot(c, principal)
+        current = current_snapshot["planner_state"][0]
         current_revision = current["data"]["revision"]
-        current_snapshot = _current_snapshot(c)
         current_counts = {"planner_state": 1, "instrument_catalog": len(current_snapshot["instrument_catalog"]),
             "portfolio_history": len(current_snapshot["portfolio_history"]), "stock_cache": len(current_snapshot["stock_cache"])}
         etag = _current_etag(current_snapshot)
     uploaded_counts = {"planner_state": 1, "instrument_catalog": len(tables["instrument_catalog"]),
         "portfolio_history": len(tables["portfolio_history"]), "stock_cache": len(tables["stock_cache"])}
+    if principal is not None:
+        uploaded_counts["instrument_catalog"] = 0
+        uploaded_counts["stock_cache"] = 0
     workbook_hash = sha256(content).hexdigest()
     token = secrets.token_urlsafe(32)
-    _confirmations.clear()
-    _confirmations[token] = {"workbook_sha256": workbook_hash, "current_revision": current_revision,
-        "current_etag": etag, "expires_at": datetime.now(timezone.utc).timestamp() + 600, "workbook": content}
+    now = datetime.now(timezone.utc).timestamp()
+    for old_token, confirmation in list(_confirmations.items()):
+        if confirmation["expires_at"] < now:
+            _confirmations.pop(old_token, None)
+    pending_bytes = sum(len(item["workbook"]) for item in _confirmations.values())
+    while _confirmations and (len(_confirmations) >= MAX_PENDING_CONFIRMATIONS
+            or pending_bytes + len(content) > MAX_PENDING_CONFIRMATION_BYTES):
+        # Dict insertion order lets us expire the oldest preview first.
+        oldest_token = next(iter(_confirmations))
+        oldest = _confirmations.pop(oldest_token)
+        pending_bytes -= len(oldest["workbook"])
+    _confirmations[token] = {"principal": principal, "workbook_sha256": workbook_hash, "current_revision": current_revision,
+        "current_etag": etag, "expires_at": now + 600, "workbook": content}
     warnings = []
     if workbook["sample_data"]:
-        warnings.append("This is synthetic sample data. Importing it replaces current records with one example bank account and entry.")
+        warning_scope = "this tenant's " if principal is not None else ""
+        warnings.append(f"This is synthetic sample data. Importing it replaces {warning_scope}current records with one example bank account and entry.")
+    elif principal is not None:
+        warnings.append("Import replaces only this user's ledger and portfolio history and creates a rollback snapshot.")
     else:
         warnings.append("Import replaces all data in four tables and creates a rollback snapshot.")
-    warnings.append("Telegram's update offset stays monotonic; pending conversation and reply state are cleared.")
+    if principal is not None:
+        warnings.append("Tenant import changes only this user's ledger and history; shared market catalog and quote cache are ignored.")
+    else:
+        warnings.append("Telegram's update offset stays monotonic; pending conversation and reply state are cleared.")
     if tables["planner_state"]["data"]["revision"] != current_revision:
         warnings.append("Imported ledger revision differs from current revision.")
     return {"archive_sha256": workbook_hash, "current_revision": current_revision, "current_etag": etag,
@@ -699,9 +758,15 @@ def _counts(tables):
             "portfolio_history": len(tables["portfolio_history"]), "stock_cache": len(tables["stock_cache"])}
 
 
-def commit_import(workbook_hash, current_revision, current_etag, token):
+def commit_import(workbook_hash, current_revision, current_etag, token, principal=None):
+    pending = _confirmations.get(token)
+    if (not pending or pending.get("principal") != principal
+            or pending["expires_at"] < datetime.now(timezone.utc).timestamp()):
+        raise WorkbookError("Confirmation token is invalid, expired, or already used")
+    # Consume only for the same principal that obtained the preview. A guessed
+    # or misrouted token from another tenant cannot invalidate its owner's flow.
     pending = _confirmations.pop(token, None)
-    if not pending or pending["expires_at"] < datetime.now(timezone.utc).timestamp():
+    if not pending:
         raise WorkbookError("Confirmation token is invalid, expired, or already used")
     if (not isinstance(workbook_hash, str) or not secrets.compare_digest(pending["workbook_sha256"], workbook_hash)
             or pending["current_revision"] != current_revision or not isinstance(current_etag, str)
@@ -711,31 +776,42 @@ def commit_import(workbook_hash, current_revision, current_etag, token):
     state_row, instruments, history, cache = _parse_import_tables(workbook["tables"])
     with store.engine.begin() as c:
         store.lock_application(c)
-        live = c.execute(select(store.state).where(store.state.c.id == 1).with_for_update()).mappings().one()
+        live_snapshot = _current_snapshot(c, principal)
+        live = live_snapshot["planner_state"][0]
         if live["data"].get("revision", 0) != current_revision:
             raise WorkbookError("Live data changed after validation; validate the workbook again")
-        live_snapshot = _current_snapshot(c)
         if not secrets.compare_digest(_current_etag(live_snapshot), current_etag):
             raise WorkbookError("Live data changed after validation; validate the workbook again")
         rollback = _write_rollback(live_snapshot)
-        imported_bot = state_row["data"].setdefault("bot", {})
-        current_bot = live["data"].get("bot", {})
-        imported_bot["offset"] = max(imported_bot.get("offset", 0), current_bot.get("offset", 0))
-        imported_bot["session"] = None
-        if "pending_reply" in imported_bot or "pending_reply" in current_bot:
-            imported_bot["pending_reply"] = None
-        if "pending_markup" in imported_bot or "pending_markup" in current_bot:
-            imported_bot["pending_markup"] = None
-        c.execute(update(store.state).where(store.state.c.id == 1).values(
-            schema_version=state_row["schema_version"], data=state_row["data"]))
-        for table in (store.instruments, store.portfolio_history, store.stock_cache):
-            c.execute(delete(table))
-        if instruments:
-            c.execute(insert(store.instruments), instruments)
-        if history:
-            c.execute(insert(store.portfolio_history), history)
-        if cache:
-            c.execute(insert(store.stock_cache), cache)
+        if principal is None:
+            imported_bot = state_row["data"].setdefault("bot", {})
+            current_bot = store.read_bot_runtime(c)
+            imported_bot["offset"] = max(imported_bot.get("offset", 0), current_bot.get("offset", 0))
+            imported_bot["session"] = None
+            if "pending_reply" in imported_bot or "pending_reply" in current_bot:
+                imported_bot["pending_reply"] = None
+            if "pending_markup" in imported_bot or "pending_markup" in current_bot:
+                imported_bot["pending_markup"] = None
+            state_row["data"].pop("bot", None)
+            c.execute(update(store.state).where(store.state.c.id == 1).values(
+                schema_version=state_row["schema_version"], data=state_row["data"]))
+            c.execute(update(store.bot_runtime).where(store.bot_runtime.c.id == 1).values(data=imported_bot))
+            for table in (store.instruments, store.portfolio_history, store.stock_cache):
+                c.execute(delete(table))
+            if instruments:
+                c.execute(insert(store.instruments), instruments)
+            if history:
+                c.execute(insert(store.portfolio_history), history)
+            if cache:
+                c.execute(insert(store.stock_cache), cache)
+        else:
+            tenant_data = store._new_tenant_data(state_row["data"])
+            c.execute(delete(store.tenant_ledger).where(store.tenant_ledger.c.principal == principal))
+            c.execute(store.tenant_ledger.insert().values(principal=principal,
+                schema_version=state_row["schema_version"], data=tenant_data))
+            c.execute(delete(store.tenant_portfolio_history).where(store.tenant_portfolio_history.c.principal == principal))
+            if history:
+                c.execute(insert(store.tenant_portfolio_history), [dict(row, principal=principal) for row in history])
     try:
         root = Path(os.environ.get("DATA_ROLLBACK_DIR", "/data/data-import-rollback"))
         snapshots = sorted(root.glob("rollback-*.xlsx"), key=lambda path: path.stat().st_mtime, reverse=True)
@@ -744,5 +820,11 @@ def commit_import(workbook_hash, current_revision, current_etag, token):
     except OSError:
         logging.exception("Import committed, but rollback snapshot retention cleanup failed")
     rollback.pop("path", None)
-    return {"status": "committed", "counts": _counts(workbook["tables"]), "rollback_snapshot": rollback,
-            "notices": ["Telegram update offset kept monotonic; pending conversation and reply cleared."]}
+    counts = _counts(workbook["tables"])
+    if principal is not None:
+        counts["instrument_catalog"] = 0
+        counts["stock_cache"] = 0
+    notices = ([] if principal is not None else
+        ["Telegram update offset kept monotonic; pending conversation and reply cleared."])
+    return {"status": "committed", "counts": counts, "rollback_snapshot": rollback,
+            "notices": notices}

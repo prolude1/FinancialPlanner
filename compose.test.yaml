@@ -1,13 +1,14 @@
-name: financial-planner
-x-backend: &backend
-  image: financial-planner-backend:local
+name: financial-planner-test
+
+x-test-backend: &test-backend
+  image: financial-planner-backend:test
   build:
     context: .
     dockerfile: backend/Dockerfile
-  environment: &environment
+  environment: &test-environment
     DATABASE_URL: postgresql+psycopg://planner:${POSTGRES_PASSWORD:?Run python3 scripts/configure.py}@db:5432/planner
     APP_TIMEZONE: ${APP_TIMEZONE:-Asia/Singapore}
-    WEB_ORIGIN: http://localhost:${WEB_PORT:-8080}
+    WEB_ORIGIN: http://localhost:18080
   restart: unless-stopped
   init: true
   security_opt:
@@ -21,80 +22,82 @@ services:
       POSTGRES_DB: planner
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Run python3 scripts/configure.py}
     volumes:
-      - planner-data:/var/lib/postgresql/data
+      - planner-test-data:/var/lib/postgresql/data
     healthcheck:
       test: [CMD-SHELL, "pg_isready -U planner -d planner"]
       interval: 5s
       timeout: 3s
       retries: 20
     restart: unless-stopped
+
   migrate:
-    <<: *backend
+    <<: *test-backend
     command: [python, -m, app.core.store]
     restart: "no"
     depends_on:
       db:
         condition: service_healthy
+
   api:
-    <<: *backend
+    <<: *test-backend
     env_file:
       - .env.telegram-link
     volumes:
-      - planner-import-rollback:/data
+      - planner-test-import-rollback:/data
     environment:
-      <<: *environment
+      <<: *test-environment
       SESSION_SECRET: ${SESSION_SECRET:?Run python3 scripts/configure.py}
       WEB_PASSWORD_HASH: ${WEB_PASSWORD_HASH:?Run python3 scripts/configure.py}
       BOT_API_SECRET: ${BOT_API_SECRET:?Run python3 scripts/configure.py}
-      KEYCLOAK_ISSUER: ${KEYCLOAK_ISSUER:-http://localhost:8081/realms/financial-planner}
-      KEYCLOAK_AUDIENCE: ${KEYCLOAK_AUDIENCE:-financial-planner-api}
-      KEYCLOAK_JWKS_URL: ${KEYCLOAK_JWKS_URL:-http://keycloak:8080/realms/financial-planner/protocol/openid-connect/certs}
+      KEYCLOAK_ISSUER: http://localhost:18081/realms/financial-planner
+      KEYCLOAK_AUDIENCE: financial-planner-api
+      KEYCLOAK_JWKS_URL: http://keycloak:8080/realms/financial-planner/protocol/openid-connect/certs
       TELEGRAM_BOT_USERNAME: ${TELEGRAM_BOT_USERNAME:-KMFinancialPlannerBot}
     depends_on:
       migrate:
         condition: service_completed_successfully
+      keycloak:
+        condition: service_started
     healthcheck:
       test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
       interval: 10s
       timeout: 5s
       retries: 10
+
   keycloak:
     image: quay.io/keycloak/keycloak:26.7.4
-    env_file:
-      - .env.keycloak
+    command: [start-dev, --http-port=8080, --import-realm]
     environment:
-      KC_DB: postgres
-      KC_DB_URL: jdbc:postgresql://db:5432/keycloak
-      KC_DB_USERNAME: keycloak_app
       KC_HTTP_ENABLED: "true"
-      KC_HOSTNAME: http://localhost:8081
+      KC_HOSTNAME: http://localhost:18081
       KC_HEALTH_ENABLED: "true"
-    command: [start-dev, --http-port=8080]
+    volumes:
+      - keycloak-test-data:/opt/keycloak/data
+      - ./tests/keycloak:/opt/keycloak/data/import:ro
     ports:
-      - "127.0.0.1:8081:8080"
-    depends_on:
-      db:
-        condition: service_healthy
+      - "127.0.0.1:18081:8080"
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
+
   bot:
-    <<: *backend
+    <<: *test-backend
     env_file:
       - .env.telegram-link
     environment:
-      <<: *environment
-      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
-      TELEGRAM_OWNER_ID: ${TELEGRAM_OWNER_ID:-}
+      <<: *test-environment
+      TELEGRAM_BOT_TOKEN: ""
+      TELEGRAM_OWNER_ID: ""
       BOT_API_SECRET: ${BOT_API_SECRET:?Run python3 scripts/configure.py}
     command: [python, -m, app.telegram_bot]
     depends_on:
       api:
         condition: service_healthy
+
   worker:
-    <<: *backend
+    <<: *test-backend
     environment:
-      <<: *environment
+      <<: *test-environment
       MARKET_POLL_SECONDS: ${MARKET_POLL_SECONDS:-900}
       CATALOG_REFRESH_SECONDS: ${CATALOG_REFRESH_SECONDS:-86400}
       HISTORY_REFRESH_SECONDS: ${HISTORY_REFRESH_SECONDS:-21600}
@@ -103,16 +106,17 @@ services:
     depends_on:
       api:
         condition: service_healthy
+
   web:
-    image: financial-planner-web:local
+    image: financial-planner-web:test
     build: ./web
     environment:
-      KEYCLOAK_ORIGIN: ${KEYCLOAK_ORIGIN:-http://localhost:8081}
-      KEYCLOAK_ISSUER: ${KEYCLOAK_ISSUER:-http://localhost:8081/realms/financial-planner}
-      KEYCLOAK_REALM: ${KEYCLOAK_REALM:-financial-planner}
-      KEYCLOAK_WEB_CLIENT_ID: ${KEYCLOAK_WEB_CLIENT_ID:-financial-planner-spa}
+      KEYCLOAK_ORIGIN: http://localhost:18081
+      KEYCLOAK_ISSUER: http://localhost:18081/realms/financial-planner
+      KEYCLOAK_REALM: financial-planner
+      KEYCLOAK_WEB_CLIENT_ID: financial-planner-spa
     ports:
-      - "127.0.0.1:${WEB_PORT:-8080}:8080"
+      - "127.0.0.1:18080:8080"
     depends_on:
       api:
         condition: service_healthy
@@ -126,5 +130,6 @@ services:
       retries: 5
 
 volumes:
-  planner-data:
-  planner-import-rollback:
+  planner-test-data:
+  planner-test-import-rollback:
+  keycloak-test-data:

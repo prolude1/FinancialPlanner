@@ -1,5 +1,6 @@
 fastapi==0.141.1
 pydantic==2.13.5
+PyJWT[crypto]==2.15.0
 uvicorn==0.53.0
 SQLAlchemy==2.0.54
 psycopg[binary]==3.2.6
@@ -11,4 +12,3 @@ itsdangerous==2.2.0
 yfinance==1.7.0
 exchange-calendars==4.13.2
 pytest==9.1.1
-

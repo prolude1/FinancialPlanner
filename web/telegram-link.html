@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#123b35"><title>Connect Telegram · Ledger</title>
+  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/telegram-link.css">
+  <script src="/runtime-config.js"></script>
+  <script src="/dist/telegram-link.bundle.js" defer></script>
+</head>
+<body>
+  <main class="telegram-link-wrap">
+    <section class="telegram-link-card" aria-labelledby="telegram-link-title">
+      <a class="back-link" href="/">← Back to Ledger</a>
+      <p class="eyebrow">ACCOUNT CONNECTION</p>
+      <h1 id="telegram-link-title">Connect Telegram</h1>
+      <div class="notice soft"><strong>Telegram linking only</strong><p>Keycloak sign-in on this page manages your Telegram connection. It does not sign you in to financial records. The existing dashboard keeps its separate password sign-in.</p></div>
+      <div id="telegram-link-status" class="telegram-link-status" role="status" aria-live="polite">Checking configuration…</div>
+      <div class="telegram-link-actions">
+        <button id="keycloak-sign-in" type="button" hidden>Sign in with Keycloak <span>↗</span></button>
+        <button id="telegram-connect" type="button" hidden>Connect Telegram</button>
+        <a id="telegram-deep-link" class="button-link" href="#" target="_blank" rel="noopener noreferrer" hidden>Open Telegram to finish linking ↗</a>
+        <button id="telegram-refresh" class="secondary" type="button" hidden>Check connection status</button>
+        <button id="telegram-unlink" class="text-button danger-text" type="button" hidden>Unlink Telegram</button>
+      </div>
+      <p id="telegram-link-detail" class="section-note"></p>
+      <p class="telegram-link-footer"><a href="/">Return to the Ledger sign-in page</a></p>
+    </section>
+  </main>
+  <dialog id="telegram-unlink-dialog" class="telegram-unlink-dialog">
+    <div class="modal-head"><h2>Unlink Telegram?</h2><button id="telegram-unlink-close" class="icon-button" type="button" aria-label="Close dialog">×</button></div>
+    <p>This removes the Telegram connection from your Keycloak account. It does not change financial records.</p>
+    <p id="telegram-unlink-error" class="error" role="alert"></p>
+    <div class="form-actions"><button id="telegram-unlink-cancel" class="secondary" type="button">Keep connected</button><button id="telegram-unlink-confirm" type="button">Unlink Telegram</button></div>
+  </dialog>
+</body>
+</html>

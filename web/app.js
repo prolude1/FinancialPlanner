@@ -4,20 +4,31 @@ const esc = (v) => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&
 const fmt = (v, digits=2) => v == null ? 'Unavailable' : Number(v).toLocaleString('en-SG', {minimumFractionDigits:digits, maximumFractionDigits:digits});
 const labels = {cash:'Cash', equity:'Equities', etf:'ETFs', cpf:'CPF'};
 const colors = {cash:'#b9d291', equity:'#1f6152', etf:'#78a58d', cpf:'#e4d7ad'};
-let data, csrf='', revision=-1, dataDate='', polling=false, lastLoaded=0;
+let data, revision=-1, dataDate='', polling=false, lastLoaded=0, me=null;
 const chartState={};
+const PlannerAuth=globalThis.PlannerAuth||{configured:false,authenticated:false,request:async()=>{throw new Error('Keycloak sign-in is not configured.');},init:async()=>false,login:async()=>{},logout:async()=>{}};
 
 async function api(path, options={}) {
-  const headers={'X-CSRF-Token':csrf,...options.headers};if(!(options.body instanceof FormData))headers['Content-Type']='application/json';
-  const response = await fetch('/api'+path, {...options, headers});
+  const headers={...options.headers};if(!(options.body instanceof FormData))headers['Content-Type']='application/json';
+  const response = await PlannerAuth.request('/api'+path, {...options, headers});
   const contentType=response.headers.get('content-type')||'',body=contentType.includes('json')?await response.json():null;
   if (!response.ok) {
-    if(response.status===401) showLogin();
     throw Object.assign(new Error(typeof body?.detail === 'string' ? body.detail : body?.detail?.message || body?.message || 'Request failed. Check the fields and try again.'),{status:response.status,code:body?.detail?.code||body?.code});
   }
   return contentType.includes('json')?body:response;
 }
-function showLogin(){ $('#shell').hidden=true; $('#login').hidden=false; csrf=''; }
+function showLogin(message=''){
+  data=null;me=null;revision=-1;dataDate='';bankCashflow=null;
+  $('#shell').hidden=true;$('#login').hidden=false;$('#content').replaceChildren();$('#notice').replaceChildren();
+  $('#modal').close();$('#modal-body').replaceChildren();
+  $('#claim-owner').hidden=true;$('#owner-claim-state').hidden=true;
+  backupState.preview=null;backupState.file=null;backupState.fileName='';backupState.confirming=false;
+  $('#keycloak-sign-in').disabled=!PlannerAuth.configured;
+  $('#keycloak-sign-in').textContent=PlannerAuth.configured?'Sign in with Keycloak ↗':'Keycloak sign-in is not configured';
+  $('#login-error').textContent=message;
+  $('#login-status').textContent=PlannerAuth.configured?'Use your Keycloak account to open your personal workspace.':'An administrator must set the public Keycloak issuer, realm, and SPA client ID.';
+}
+PlannerAuth.onUnauthorized=()=>showLogin('Your Keycloak session expired. Sign in again to continue.');
 function toast(message){ $('#toast').textContent=message; $('#toast').hidden=false; setTimeout(()=>$('#toast').hidden=true,4500); }
 function route(){ const [page,id] = location.hash.slice(1).split('/'); return {page:page || 'overview',id}; }
 function badge(text, warning=false){ return `<span class="badge ${warning?'warning':''}">${esc(text)}</span>`; }
@@ -144,6 +155,30 @@ async function load(){
   $('#connection').textContent='● Connected · updated '+new Date().toLocaleTimeString('en-SG',{hour:'2-digit',minute:'2-digit'});
   render();
 }
+async function loadIdentity(){
+  me=await api('/me');
+  const claim=me?.legacy_claim;
+  if(!claim||typeof claim.available!=='boolean'||typeof claim.completed!=='boolean')throw new Error('The account status response is incomplete. Refresh or contact your administrator.');
+  $('#claim-owner').hidden=!claim.available;
+  $('#owner-claim-state').hidden=!claim.completed;
+  $('#owner-claim-state').textContent=claim.completed?'Existing ledger claimed for this account.':'';
+}
+function openOwnerClaim(){
+  if(!me?.legacy_claim?.available)return;
+  openModal('Claim the existing ledger',`<form id="owner-claim-form"><p class="form-note">Enter the one-time code provided for the existing ledger. The code is checked by the server and can only be used once.</p><label>One-time owner-claim code<input name="code" type="password" autocomplete="off" required maxlength="256"></label><p id="owner-claim-error" class="error" role="alert"></p><div class="form-actions"><button type="button" class="secondary" data-action="close">Cancel</button><button type="submit">Claim ledger</button></div></form>`);
+  $('#owner-claim-form').onsubmit=async event=>{
+    event.preventDefault();const form=event.currentTarget,button=form.querySelector('[type="submit"]'),code=new FormData(form).get('code').trim();
+    if(!code)return;button.disabled=true;$('#owner-claim-error').textContent='';
+    try{
+      const result=await api('/owner-claim',{method:'POST',body:JSON.stringify({code})});
+      if(result?.status!=='claimed')throw new Error('The server did not confirm the ledger claim.');
+    }catch(error){$('#owner-claim-error').textContent=error.status===400?'This claim code is invalid, expired, or already used.':error.message;button.disabled=false;return;}
+    $('#modal').close();
+    try{await loadIdentity();await load();toast('Existing ledger claimed for this Keycloak account.');}
+    catch(error){toast(`Ledger claim succeeded, but the dashboard could not refresh: ${error.message}`);}
+    finally{button.disabled=false;}
+  };
+}
 function input(name,label,type='text',value='',extra=''){return `<label>${label}<input name="${name}" type="${type}" value="${esc(value)}" ${extra} required></label>`;}
 function openModal(title,html){$('#modal-title').textContent=title;$('#modal-body').innerHTML=html;$('#modal').showModal();}
 function formFooter(label){return `<p id="form-error" class="error" role="alert"></p><div class="form-actions"><button type="button" class="secondary" data-action="close">Cancel</button><button type="submit">${label}</button></div>`;}
@@ -207,6 +242,7 @@ document.addEventListener('click',e=>{
     openModal('Cancel this repayment?',`<form id="void-form"><p>The payment will be reversed, its funding returned to the recorded accounts, and the loan balance recalculated. History is retained.</p>${formFooter('Cancel repayment')}</form>`);
     $('#void-form').onsubmit=e=>{e.preventDefault();submitCommand('void',{transaction:b.dataset.id},e.target);};
   }
+  if(action==='claim-owner')openOwnerClaim();
 });
 document.addEventListener('change',e=>{
   if(e.target.name==='credit_account'&&e.target.closest?.('#transaction-edit-form')){updateTransactionCardOptions(e.target.closest('#transaction-edit-form'));return;}
@@ -239,15 +275,23 @@ document.addEventListener('pointerout',e=>{const chart=e.target.closest?.('.cand
 document.addEventListener('click',e=>{if(!e.target.closest('.stock-search')&&stockState.suggestionsOpen){stockState.suggestionsOpen=false;stockState.highlight=-1;renderStockSearch();}});
 document.addEventListener('wheel',e=>{const root=e.target.closest?.('.brokerage-chart');if(!root)return;e.preventDefault();const rows=data.portfolio_history[root.dataset.account]||[],state=chartState[root.dataset.account],span=state.end-state.start+1;if(rows.length<2)return;const factor=(e.deltaY<0)?0.8:1.25,next=Math.min(rows.length,Math.max(2,Math.round(span*factor))),rect=root.querySelector('svg').getBoundingClientRect(),focus=Math.max(0,Math.min(1,(e.clientX-rect.left)/rect.width)),center=state.start+Math.round(focus*(span-1));state.start=Math.max(0,Math.min(rows.length-next,center-Math.round(focus*(next-1))));state.end=state.start+next-1;state.period='custom';drawBrokerageChart(root.dataset.account);},{passive:false});
 $('#close-modal').onclick=()=>$('#modal').close();
-$('#login-form').onsubmit=async e=>{e.preventDefault();const b=e.target.querySelector('button');b.disabled=true;$('#login-error').textContent='';try{const s=await api('/login',{method:'POST',body:JSON.stringify({password:e.target.elements.password.value})});csrf=s.csrf;e.target.reset();await load();}catch(error){$('#login-error').textContent=error.message;}finally{b.disabled=false;}};
-$('#logout').onclick=async()=>{try{await api('/logout',{method:'POST'});showLogin();}catch(error){toast(error.message);}};
+$('#keycloak-sign-in').onclick=async()=>{const button=$('#keycloak-sign-in');button.disabled=true;$('#login-error').textContent='';try{await PlannerAuth.login();}catch(error){$('#login-error').textContent=error.message||'Unable to start Keycloak sign-in.';button.disabled=false;}};
+$('#logout').onclick=async()=>{showLogin();try{await PlannerAuth.logout();}catch(error){$('#login-error').textContent=error.message||'Unable to sign out of Keycloak.';}};
 window.addEventListener('hashchange',()=>{render();window.scrollTo(0,0);});
 async function poll(force=false){
-  if(!csrf||polling||document.hidden)return;
+  if(!PlannerAuth.authenticated||polling||document.hidden)return;
   polling=true;
   try{const r=await api('/revision');const current=route(), brokerageOpen=current.page==='accounts'&&data?.accounts.some(a=>a.id===current.id&&a.type==='brokerage');if(force||r.revision!==revision||r.date!==dataDate||(brokerageOpen&&Date.now()-lastLoaded>=30000))await load();else $('#connection').textContent='● Connected · checked '+new Date().toLocaleTimeString('en-SG',{hour:'2-digit',minute:'2-digit'});}
   catch(error){$('#connection').textContent='○ Offline · showing last received values';}
   finally{polling=false;}
 }
 window.addEventListener('focus',()=>poll(true));setInterval(poll,5000);
-(async()=>{try{const session=await api('/session');csrf=session.csrf;await load();}catch{showLogin();}})();
+(async()=>{
+  if(!PlannerAuth.configured){showLogin();return;}
+  $('#login-status').textContent='Checking your Keycloak session…';
+  try{
+    const authenticated=await PlannerAuth.init();
+    if(!authenticated){showLogin();return;}
+    await loadIdentity();await load();
+  }catch(error){showLogin(error.message||'Unable to load your personal workspace.');}
+})();

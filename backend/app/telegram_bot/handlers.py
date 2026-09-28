@@ -6,7 +6,6 @@ import time
 from datetime import date, datetime
 from decimal import Decimal
 from zoneinfo import ZoneInfo
-from ..core import store
 
 FIELDS = {
     "futurevalue": [("initial_value", "Starting amount?"), ("cashflow", "Recurring contribution (use a negative number for withdrawals)?"),
@@ -92,18 +91,12 @@ def top_level_command_text():
                      for start in range(0, len(commands), 4))
 
 
-def configure_command_menu(client, base, owner):
-    """Publish native slash-command suggestions for the owner's private chat."""
+def configure_command_menu(client, base, _legacy_owner_ignored=None):
+    """Publish slash-command suggestions for any linked private user."""
     registered = client.post(base + "setMyCommands", json={
         "commands": telegram_commands(),
-        "scope": {"type": "chat", "chat_id": owner},
     })
     registered.raise_for_status()
-    menu = client.post(base + "setChatMenuButton", json={
-        "chat_id": owner,
-        "menu_button": {"type": "commands"},
-    })
-    menu.raise_for_status()
 
 
 def action_keyboard(actions):
@@ -305,32 +298,94 @@ def code_entities(text):
     return entities
 
 
-def authorized(update, owner):
+def authorized(update, expected_actor=None):
     msg = update.get("message", {})
-    return bool(owner and msg.get("from", {}).get("id") == owner and
-                msg.get("chat", {}).get("type") == "private" and msg.get("chat", {}).get("id") == owner)
+    sender = msg.get("from", {}).get("id")
+    chat = msg.get("chat", {})
+    return bool(isinstance(sender, int) and not isinstance(sender, bool) and sender > 0
+                and (expected_actor is None or sender == expected_actor)
+                and sender <= 4503599627370495
+                and isinstance(chat.get("id"), int) and not isinstance(chat.get("id"), bool)
+                and chat.get("type") == "private" and chat.get("id") == sender)
 
 
-def handle(update, owner, query, mutate, resolve_instrument=None, calculate=None):
-    if not authorized(update, owner):
+def start_link_challenge(text):
+    """Return a deep-link challenge, an empty string for malformed link args, or None."""
+    command, _, arguments = text.partition(" ")
+    command = command.split("@", 1)[0].lower()
+    if command != "/start" or not arguments.startswith("link_"):
         return None
-    text = update["message"].get("text", "").strip()
+    challenge = arguments[5:]
+    return challenge if re.fullmatch(r"[A-Za-z0-9_-]{32,128}", challenge) else ""
+
+
+def handle_link_start(update, challenge, confirm_link):
+    """Confirm one Keycloak-issued challenge from a verified private Bot API update."""
     uid = update["update_id"]
-    state = store.read()
-    if uid < state["bot"]["offset"]:
+    message = update.get("message", {})
+    sender = message.get("from", {})
+    chat = message.get("chat", {})
+    telegram_user_id = sender.get("id")
+    telegram_chat_id = chat.get("id")
+    valid_ids = all(isinstance(value, int) and not isinstance(value, bool)
+                    and 0 < value <= 4503599627370495
+                    for value in (telegram_user_id, telegram_chat_id))
+    if chat.get("type") != "private" or not valid_ids or telegram_chat_id != telegram_user_id:
+        result = "Open this link in a private chat with the bot. No changes were made."
+    elif not challenge:
+        result = "This link is invalid. Create a new link from the web app."
+    else:
+        try:
+            confirmation = confirm_link(challenge, telegram_user_id, telegram_chat_id) if confirm_link else "unavailable"
+        except Exception:
+            confirmation = "unavailable"
+        if confirmation == "linked":
+            result = "Telegram account linked successfully. Return to the web app to check the connection."
+        elif confirmation == "invalid":
+            result = ("This link is invalid, expired, already used, or cannot be linked. "
+                      "Check the web app or create a new link.")
+        else:
+            result = "Telegram linking is temporarily unavailable. Try again later."
+    return result
+
+
+def handle(update, actor_id, query, mutate, load_state, save_state,
+           calculate=None, confirm_link=None):
+    text = update.get("message", {}).get("text", "").strip()
+    link_challenge = start_link_challenge(text)
+    if link_challenge is not None:
+        return handle_link_start(update, link_challenge, confirm_link)
+    if not authorized(update) or update.get("message", {}).get("from", {}).get("id") != actor_id:
         return None
-    session = state["bot"]["session"]
+    uid = update["update_id"]
+    command = text.split(" ", 1)[0].split("@", 1)[0].lstrip("/").lower()
+    command = COMMAND_ALIASES.get(command, command)
+    if text.startswith("/") and command in {"history", "correct", "void"}:
+        return "Transaction history and edits are handled in the web app. No changes were made."
+    dashboard = query()
+    remote_state = load_state()
+    state = {"accounts": {a["id"]: a for a in dashboard.get("accounts", [])},
+             "credit_accounts": {a["id"]: {**a, "cards": {
+                 c["id"]: c for c in (a.get("cards", []) if isinstance(a.get("cards", []), list)
+                                      else a.get("cards", {}).values())}}
+                                 for a in dashboard.get("credit_accounts", [])},
+             "bot": {"session": remote_state.get("session"),
+                     "last_tvm": remote_state.get("last_tvm")}}
+    session = remote_state.get("session")
     retired_commands = {"history", "correct", "void"}
-    retired_stock_commands = {"stock", "stock_show", "stock_price", "stock_earnings",
-                              "stock_financials", "stock_refresh"}
     legacy_edit_session = bool(session and session.get("command") in {"correct", "void"})
-    legacy_stock_session = bool(session and session.get("command") == "stock")
+    unsupported_legacy_session = bool(session and session.get("command") not in FIELDS
+                                      and not legacy_edit_session)
     if legacy_edit_session:
         # Persisted conversation state can outlive a bot restart. Never let a
         # post-upgrade reply finish an edit workflow removed from Telegram.
         session = None
-    elif legacy_stock_session:
-        # A persisted lookup session predates removal of Telegram stock viewing.
+    elif unsupported_legacy_session:
+        # Persisted state may refer to a guided flow no longer available in Telegram.
+        session = None
+    if text.split(" ", 1)[0].split("@", 1)[0].lower() == "/start":
+        # A fresh start discards any conversation left over from a prior
+        # unlink/relink cycle before it can be confirmed against a new link.
         session = None
     if session and time.time() - session["started"] > 1800:
         session = None
@@ -340,26 +395,18 @@ def handle(update, owner, query, mutate, resolve_instrument=None, calculate=None
         callback_nonce = callback_data.partition("date:today:")[2]
         if not date_step(session) or callback_nonce != session.get("nonce"):
             result = "That Today button has expired. No changes were made."
-            with store.transaction() as s:
-                s["bot"]["session"] = session
-                s["bot"]["offset"] = uid + 1
-                s["bot"]["pending_reply"] = result
-                s["bot"]["pending_markup"] = session_keyboard(session, state)
+            save_state(session=session, pending_reply=result, pending_markup=session_keyboard(session, state))
             return result
         text = "today"
     result = "Use /help for available commands."
     pending_markup = None
     calculator_result = None
-    command = text.split(" ", 1)[0].split("@", 1)[0].lstrip("/").lower()
-    command = COMMAND_ALIASES.get(command, command)
     if legacy_edit_session:
         result = "This older Telegram edit was cancelled without changes. View and edit transactions in the web app."
-    elif legacy_stock_session:
-        result = "Telegram stock lookups are no longer available. Use the web dashboard."
+    elif unsupported_legacy_session:
+        result = "That older Telegram operation is no longer available. Use /help to continue."
     elif text.startswith("/") and command in retired_commands:
         result = "Transaction history and edits are handled in the web app. No changes were made."
-    elif text.startswith("/") and command in retired_stock_commands:
-        result = "Telegram stock lookups are no longer available. Use the web dashboard."
     elif text.startswith("/"):
         if command in ("start", "help"):
             result = ("Your private financial ledger.\nAvailable commands:\n"
@@ -435,11 +482,7 @@ def handle(update, owner, query, mutate, resolve_instrument=None, calculate=None
             if not valid_transaction_date(candidate, today):
                 session, result = date_retry(session, today, state)
                 markup = session_keyboard(session, state)
-                with store.transaction() as s:
-                    s["bot"]["session"] = session
-                    s["bot"]["offset"] = uid + 1
-                    s["bot"]["pending_reply"] = result
-                    s["bot"]["pending_markup"] = markup
+                save_state(session=session, pending_reply=result, pending_markup=markup)
                 return result
             text = candidate
             session["date_attempts"] = 0
@@ -454,11 +497,7 @@ def handle(update, owner, query, mutate, resolve_instrument=None, calculate=None
             text = text.strip().upper()
         if session["command"] == "account_add" and field == "currency" and text not in ("SGD", "USD"):
             result = "Only SGD and USD are supported. Enter SGD or USD, then retry.\n" + prompt(session, state)
-            with store.transaction() as s:
-                s["bot"]["session"] = session
-                s["bot"]["offset"] = uid + 1
-                s["bot"]["pending_reply"] = result
-                s["bot"]["pending_markup"] = session_keyboard(session, state)
+            save_state(session=session, pending_reply=result, pending_markup=session_keyboard(session, state))
             return result
         if session["command"] in ("futurevalue", "presentvalue") and field in (
                 "cashflow_frequency", "compounding_frequency", "cashflow_timing"):
@@ -473,11 +512,7 @@ def handle(update, owner, query, mutate, resolve_instrument=None, calculate=None
                 if (len(parts) != 2 or parts[0] not in ("NYSE", "NASDAQ", "LSE", "SGX")
                         or not re.fullmatch(r"[A-Z0-9.^-]{1,20}", parts[1])):
                     result = "Use EXCHANGE:TICKER, for example NASDAQ:AAPL.\n" + prompt(session, state)
-                    with store.transaction() as s:
-                        s["bot"]["session"] = session
-                        s["bot"]["offset"] = uid + 1
-                        s["bot"]["pending_reply"] = result
-                        s["bot"]["pending_markup"] = session_keyboard(session, state)
+                    save_state(session=session, pending_reply=result, pending_markup=session_keyboard(session, state))
                     return result
                 instrument_shortcut = tuple(parts)
                 session["data"]["exchange"], session["data"]["symbol"] = instrument_shortcut
@@ -489,11 +524,7 @@ def handle(update, owner, query, mutate, resolve_instrument=None, calculate=None
                     or not re.fullmatch(r"\d+(?:\.\d+)?", parts[0])
                     or not re.fullmatch(r"\d+(?:\.\d+)?", parts[1])):
                 result = "Use quantity/price, for example 10/123.45.\n" + prompt(session, state)
-                with store.transaction() as s:
-                    s["bot"]["session"] = session
-                    s["bot"]["offset"] = uid + 1
-                    s["bot"]["pending_reply"] = result
-                    s["bot"]["pending_markup"] = session_keyboard(session, state)
+                save_state(session=session, pending_reply=result, pending_markup=session_keyboard(session, state))
                 return result
             text = parts[0]
             session["data"]["price"] = parts[1]
@@ -503,11 +534,7 @@ def handle(update, owner, query, mutate, resolve_instrument=None, calculate=None
             if not match:
                 result = ("Enter currency and amount together using SGD or USD, "
                           "for example SGD 100 or USD 25.50. Please retry.\n" + prompt(session, state))
-                with store.transaction() as s:
-                    s["bot"]["session"] = session
-                    s["bot"]["offset"] = uid + 1
-                    s["bot"]["pending_reply"] = result
-                    s["bot"]["pending_markup"] = session_keyboard(session, state)
+                save_state(session=session, pending_reply=result, pending_markup=session_keyboard(session, state))
                 return result
             currency_code, amount = match.groups()
             if field == "money":
@@ -535,41 +562,14 @@ def handle(update, owner, query, mutate, resolve_instrument=None, calculate=None
                     card_shortcut = True
             if not card_shortcut:
                 result = "Choose one of the listed cards.\n" + prompt(session, state)
-                with store.transaction() as s:
-                    s["bot"]["session"] = session
-                    s["bot"]["offset"] = uid + 1
-                    s["bot"]["pending_reply"] = result
-                    s["bot"]["pending_markup"] = session_keyboard(session, state)
+                save_state(session=session, pending_reply=result, pending_markup=session_keyboard(session, state))
                 return result
         if not instrument_shortcut and not card_shortcut and not money_shortcut:
             session["data"][field] = text
         if (field == "symbol" or instrument_shortcut) and session["command"] in ("buy", "sell", "opening_holding", "split"):
             exchange = session["data"].get("exchange", "").upper()
-            symbol = session["data"].get("symbol", "").upper()
             if exchange in ("NYSE", "NASDAQ"):
                 session["data"]["currency"] = "USD"
-            try:
-                detected = resolve_instrument(exchange, symbol) if resolve_instrument else None
-            except Exception as exc:
-                # Keep the guided session on the symbol question so a typo or
-                # unsupported security can be corrected immediately.
-                session["data"].pop("symbol", None)
-                if field == "exchange":
-                    session["data"].pop("exchange", None)
-                result = "Ticker not accepted: " + str(exc) + ".\n" + prompt(session, state)
-                with store.transaction() as s:
-                    s["bot"]["session"] = session
-                    s["bot"]["offset"] = uid + 1
-                    s["bot"]["pending_reply"] = result
-                    s["bot"]["pending_markup"] = session_keyboard(session, state)
-                return result
-            if detected:
-                detected_currency = str(detected.get("currency", "")).upper()
-                detected_class = str(detected.get("asset_class", "")).lower()
-                if len(detected_currency) == 3 and detected_currency.isalpha():
-                    session["data"]["currency"] = detected_currency
-                if detected_class in ("equity", "etf"):
-                    session["data"]["asset_class"] = detected_class
             notes = []
             if session["data"].get("asset_class"):
                 notes.append("Detected asset class: " + session["data"]["asset_class"].upper() + ".")
@@ -613,11 +613,7 @@ def handle(update, owner, query, mutate, resolve_instrument=None, calculate=None
             session = None
         else:
             result = "Review /" + session["command"] + ":\n" + "\n".join(f"{k}: {v}" for k, v in session["data"].items()) + "\n/confirm to save or /cancel."
-    with store.transaction() as s:
-        s["bot"]["session"] = session
-        s["bot"]["offset"] = uid + 1
-        s["bot"]["pending_reply"] = result
-        s["bot"]["pending_markup"] = pending_markup or session_keyboard(session, state)
-        if calculator_result is not None:
-            s["bot"]["last_tvm"] = calculator_result
+    save_state(session=session, pending_reply=result,
+               pending_markup=pending_markup or session_keyboard(session, state),
+               last_tvm=calculator_result if calculator_result is not None else state["bot"].get("last_tvm"))
     return result

@@ -7,7 +7,11 @@ server {
     add_header X-Frame-Options DENY always;
     add_header Referrer-Policy no-referrer always;
     add_header Cache-Control "no-store" always;
-    add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'" always;
+    add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ${KEYCLOAK_ORIGIN}; frame-ancestors 'none'; base-uri 'none'; form-action 'self'" always;
+    location = /runtime-config.js {
+        default_type application/javascript;
+        return 200 "window.PUBLIC_CONFIG = Object.freeze({keycloak:{issuer:'${KEYCLOAK_ISSUER}',realm:'${KEYCLOAK_REALM}',clientId:'${KEYCLOAK_WEB_CLIENT_ID}'}});";
+    }
     location /api/ {
         proxy_pass http://api:8000;
         proxy_set_header Host $host;

@@ -8,6 +8,8 @@
   <link rel="stylesheet" href="/activity.css">
   <link rel="stylesheet" href="/calculator.css">
   <link rel="stylesheet" href="/stocks.css">
+  <script src="/runtime-config.js"></script>
+  <script src="/dist/dashboard-auth.bundle.js" defer></script>
   <script src="/data-management.js" defer></script>
   <script src="/stocks.js" defer></script>
   <script src="/calculator.js" defer></script>
@@ -17,13 +19,13 @@
 </head>
 <body>
   <section id="login" class="login-wrap" hidden>
-    <form id="login-form" class="login-card">
+    <section class="login-card" aria-labelledby="login-title">
       <div class="brand-mark">L</div><p class="eyebrow">YOUR PERSONAL FINANCES</p>
-      <h1>A clearer view<br>of what you own.</h1><p class="muted">Sign in to your local financial dashboard.</p>
-      <label>Dashboard password<input name="password" type="password" autocomplete="current-password" required></label>
-      <button type="submit">Open my dashboard <span>↗</span></button>
-      <p id="login-error" class="error" role="alert"></p><small>Runs on your laptop. Your records stay in your database.</small>
-    </form>
+      <h1 id="login-title">A clearer view<br>of what you own.</h1><p class="muted">Sign in to your personal financial workspace.</p>
+      <button id="keycloak-sign-in" type="button" disabled>Checking sign-in configuration…</button>
+      <p id="login-error" class="error" role="alert"></p><p id="login-status" class="section-note" role="status">Connecting to your identity provider…</p>
+      <p class="telegram-access"><a href="/telegram-link.html">Connect Telegram ↗</a><small>Manage your Telegram link separately from dashboard access.</small></p>
+    </section>
   </section>
   <div id="shell" hidden>
     <aside class="sidebar">
@@ -39,7 +41,7 @@
         <a href="#data-management" data-nav="data-management"><span>⇅</span> Data management</a>
         <a href="#activity" data-nav="activity" aria-label="Transaction history"><span>≋</span> Transaction history</a>
       </nav>
-      <div class="sidebar-bottom"><div class="local-label"><span class="dot"></span> Local workspace</div><p>Record new transactions with your private Telegram bot. Review, correct, and cancel existing transactions here.</p><button id="logout" class="text-button">Sign out ↗</button></div>
+      <div class="sidebar-bottom"><div class="local-label"><span class="dot"></span> Personal workspace</div><p>Record new transactions with your private Telegram bot. Review, correct, and cancel existing transactions here.</p><button id="claim-owner" class="text-button" type="button" data-action="claim-owner" hidden>Claim existing ledger</button><span id="owner-claim-state" class="section-note" hidden></span><a class="sidebar-service-link" href="/telegram-link.html">Connect Telegram ↗</a><button id="logout" class="text-button">Sign out ↗</button></div>
     </aside>
     <main>
       <header class="topbar"><span>Personal finance <span class="breadcrumb">/ <span id="crumb">Overview</span></span></span><span id="connection" role="status">Connecting…</span></header>

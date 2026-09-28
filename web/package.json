@@ -1,0 +1,13 @@
+{
+  "name": "financial-planner-web-auth",
+  "private": true,
+  "scripts": {
+    "build": "esbuild telegram-link-entry.js --bundle --format=iife --target=es2020 --outfile=dist/telegram-link.bundle.js && esbuild dashboard-auth-entry.js --bundle --format=iife --target=es2020 --outfile=dist/dashboard-auth.bundle.js"
+  },
+  "dependencies": {
+    "keycloak-js": "26.2.4"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2"
+  }
+}

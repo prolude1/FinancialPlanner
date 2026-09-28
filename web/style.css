@@ -166,6 +166,13 @@ nav a:hover{
 .sidebar-bottom p{
   line-height:1.8
 }
+.sidebar-service-link{
+  display:block;
+  margin:12px 0;
+  color:var(--green);
+  font-size:11px;
+  font-weight:600
+}
 .topbar{
   height:70px;
   border-bottom:1px solid var(--line);
@@ -553,6 +560,18 @@ footer{
   color:var(--muted);
   font-size:10px;
   margin-top:24px
+}
+.login-card .telegram-access{
+  margin:24px 0 0;
+  font-size:11px
+}
+.login-card .telegram-access a{
+  color:var(--green);
+  font-weight:650
+}
+.login-card .telegram-access small{
+  margin-top:5px;
+  font-size:10px
 }
 label{
   display:block;

@@ -1,4 +1,6 @@
 .env
+.env.keycloak
+.env.telegram-link
 .venv/
 __pycache__/
 .pytest_cache/
@@ -6,3 +8,5 @@ __pycache__/
 backups/
 .DS_Store
 test-results/
+web/node_modules/
+web/dist/

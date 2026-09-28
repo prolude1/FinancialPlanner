@@ -7,7 +7,9 @@ This describes the implemented first release. The web UI uses plain JavaScript a
 ```mermaid
 flowchart LR
     Browser[Local browser] -->|localhost:8080| Web[web: Nginx + dashboard]
+    Browser -->|localhost:8081 OIDC| Keycloak[Keycloak realm]
     Web -->|internal HTTP| API[api: authentication + commands]
+    API -->|internal JWKS| Keycloak
     Telegram[Telegram] <-->|outbound polling| Bot[bot: private guided commands]
     Bot -->|service bearer credential| API
     API --> DB[(db: PostgreSQL)]
@@ -20,13 +22,14 @@ flowchart LR
 | Service | Image/entry point | Responsibility |
 |---|---|---|
 | `web` | `financial-planner-web:local` | Static screens, same-origin `/api` proxy, security headers |
+| `keycloak` | `quay.io/keycloak/keycloak:26.7.4` | Local OIDC issuer using the existing `keycloak` database and realm |
 | `api` | `financial-planner-backend:local`, `app.api_server.main:app` | Owner sessions, validation, atomic commands, dashboard views |
 | `bot` | Same backend image, `python -m app.telegram_bot` | Owner checks, guided prompts, confirmations, polling, durable replies |
 | `worker` | Same backend image, `python -m app.core.worker` | Exchange-session checks, daily OHLC prices, daily reference FX |
 | `migrate` | Same backend image, `python -m app.core.store` | Idempotent version-1 schema initialization; exits on success |
 | `db` | `postgres:17.4-alpine` | Persistent application state |
 
-Only web port 8080 is published, bound to `127.0.0.1`. All backend/database traffic stays on the Compose network. Telegram uses outbound polling; no public webhook or remote web access is configured.
+Web port 8080 and Keycloak port 8081 are published only on `127.0.0.1`. All backend/database traffic stays on the Compose network. Telegram uses outbound polling; no public webhook or remote web access is configured.
 
 The backend image contains three explicit package boundaries. `app.api_server`
 owns HTTP authentication, routes, and response mapping. `app.telegram_bot` owns
@@ -41,23 +44,40 @@ Compose waits for PostgreSQL health, runs migration successfully, then starts th
 
 ## Storage and transaction model
 
-The first release deliberately uses one PostgreSQL `planner_state` row with a `schema_version` and a JSON aggregate. This replaces the earlier proposal for several normalized tables. For a single user it allows all related financial operations, idempotency receipts, and derived-balance validation to commit atomically with a small implementation.
+Each financial principal has one PostgreSQL `tenant_ledger` row with a `schema_version` and JSON aggregate. A write locks the row, validates a copied state, and commits the complete aggregate atomically. The original `planner_state(id=1)` remains an unassigned legacy ledger for the old local-password/single-owner bot integration only until the owner explicitly claims it. No principal is inferred from the old row. `tenant_portfolio_history` is keyed by principal, account, and date. The instrument catalog and quote cache remain shared read-only market infrastructure.
+
+### Keycloak identity and Telegram link foundation
+
+The browser and API use Keycloak access tokens for dashboard, Telegram-link, calculator, and stock API requests. Configure `KEYCLOAK_ISSUER` to the exact realm issuer URL and `KEYCLOAK_AUDIENCE` to the API audience included by a Keycloak audience mapper. `KEYCLOAK_JWKS_URL` is optional; by default the API uses `{issuer}/protocol/openid-connect/certs`. The issuer must use HTTPS except for loopback development. JWKS must use HTTPS except for the explicitly configured Docker service URL `http://keycloak:8080/...`; other plain-HTTP hosts are rejected. Validation accepts RS256 tokens only, resolves signing keys from that configured JWKS (with caching), and verifies signature, exact issuer, audience, expiry, issued-at, and Keycloak's `typ: Bearer` claim. The stable internal principal is SHA-256 of the configured issuer plus a NUL separator plus the verified `sub`, namespaced so subjects from different issuers cannot collide. Forwarded user-ID headers and request-body identity fields are ignored.
+
+`POST /api/me/telegram-link/challenge` requires `Authorization: Bearer <Keycloak access token>` and returns HTTP 201 with `{challenge, expires_at, expires_in_seconds, bot_url}`. `TELEGRAM_BOT_USERNAME` is the public username without `@`; `bot_url` is `https://t.me/{username}?start=link_{challenge}`. Challenge creation returns HTTP 503 until the username is valid and the separate bot secret is present, at least 32 ASCII characters, and distinct from `BOT_API_SECRET`. Challenges are 256-bit opaque values, stored only as SHA-256 hashes, valid for ten minutes, and issuing a new one revokes the user's earlier pending challenge. `GET /api/me/telegram-link` returns `{connected: false}` or `{connected: true, linked_at}` for the token's own principal. `DELETE /api/me/telegram-link` unlinks only that principal and is safe to repeat.
+
+The bot confirms a challenge with `POST /internal/bot/telegram-link/confirm`, authenticated by the distinct `TELEGRAM_LINK_BOT_SECRET` from `.env.telegram-link`. Its body is `{challenge, telegram_user_id, telegram_chat_id, chat_type: "private"}`; the handler derives IDs from the verified Telegram update and confirms only a private message where `chat.id == from.id`. The API requires those IDs to match. The bot never sends a claimed Keycloak principal. Challenges are consumed and the unique principal↔Telegram binding is inserted atomically. A Telegram user ID can be linked to only one principal, and a principal can link only one Telegram user ID. Unknown, expired, or replayed challenges receive the same HTTP 409 error. The link secret must differ from `BOT_API_SECRET`. The bot's `/start link_<challenge>` flow does not alter ledger data or grant financial access.
+
+Keycloak is the identity boundary for financial APIs. `GET /api/me` returns only `{legacy_claim: {available, completed}}`; it never returns the hashed principal. `GET /api/dashboard`, `/api/cashflow`, `/api/revision`, `/api/commands/{command}`, and workbook endpoints derive the tenant solely from the verified bearer token. Existing API payloads remain unchanged and no caller may supply a principal or tenant ID. A first verified Keycloak request creates an empty tenant ledger. Legacy cookie/BOT bearer access is confined to the unclaimed legacy row and is rejected after the claim; it never falls through to a tenant ledger.
+
+The one-time legacy claim code is issued by a trusted local operator with `python scripts/issue_legacy_claim.py` while `DATABASE_URL` points at the intended application DB. The code is 256-bit random, valid for ten minutes, stored only as SHA-256, printed once, and must be delivered out-of-band. Redeem with `POST /api/owner-claim`, a Keycloak bearer, and exactly `{"code":"..."}` in the JSON body. Success is `{"status":"claimed"}`. All invalid, expired, replayed, nonempty-tenant/history, and already-claimed cases return the same generic HTTP 400. A pristine empty tenant created by sign-in can be claimed. A database lock makes the claim single-use and atomic: it copies the legacy aggregate and derived history to the verified principal, consumes the code, sets an immutable claim marker, and resets the unassigned legacy ledger/history. Code values must not be placed in URLs, logs, shell arguments, or browser storage.
+
+For multi-user Telegram finance, the bot's separate `BOT_API_SECRET` authenticates the bot service only; it is not a financial owner identity. `POST /internal/bot/financial/dashboard` accepts `{telegram_user_id,telegram_chat_id}`; `POST /internal/bot/financial/command/{command}` accepts the same IDs plus the existing domain `payload`; and `POST /internal/bot/financial/state` accepts those IDs plus `action: get|set|clear`. A `set` may include any subset of `session`, `pending_reply`, `pending_markup`, or `last_tvm`; `get` returns all four and `clear` resets all four. The API requires a private-chat ID match and resolves the linked sender through `telegram_connections` to the tenant. Unlinked senders receive a generic 403; there is no fallback to legacy data. Per-sender conversation/reply state is keyed by both principal and Telegram sender in `telegram_user_state`; state is cleared transactionally on unlink and link confirmation so it cannot cross an identity change. Telegram's polling offset stays in singleton `bot_runtime` and never appears in tenant ledgers.
+
+The dashboard at `/` and the separate Telegram-link page at `/telegram-link.html` use the pinned official `keycloak-js` adapter with Authorization Code and PKCE S256. Runtime public configuration (`KEYCLOAK_ISSUER`, `KEYCLOAK_REALM`, `KEYCLOAK_WEB_CLIENT_ID`) is served through `/runtime-config.js`; the client ID and issuer are public values and no client secret is shipped. The web CSP permits the configured Keycloak origin for adapter network requests. The Telegram-link page remains isolated from the dashboard bundle; both pages send access tokens as Bearer credentials without relying on the legacy session. Keycloak initialization errors are shown directly; neither page falls back to the local password login.
 
 Every writer locks the row using `SELECT ... FOR UPDATE`, copies its state, validates a change, and writes the new aggregate within one SQL transaction. Network requests never occur while holding the database lock. Failed validation rolls back every part of the operation. Concurrent API and worker writes cannot overwrite one another's changes.
 
-The aggregate contains:
+Each tenant aggregate contains:
 
 - `accounts`: stable IDs, names, account type, default currency, CPF subtype, archive flag.
 - `events`: financial transactions, effective dates, deterministic ordering, original payloads, channel, status, and replacement links.
 - `loans`: opening principal/interest, monthly installment, due-date anchor, and effective-dated rates.
 - `prices` / `fx`: cached daily values, source, dates, retrieval timestamps, and staleness information.
 - `receipts`: immutable submitted command/payload/result records keyed by actor plus idempotency key; administrative changes also appear here.
-- `bot`: processed update offset, active guided conversation, and pending reply.
 - `revision` / `provider_status`: dashboard refresh and source availability metadata.
+
+Bot polling and user conversation state are separate: global `bot_runtime` stores only the update offset; `telegram_user_state` stores each linked sender's flow session and pending output.
 
 Decimal quantities, cash, unit prices, rates, and interest are stored as strings and calculated using Python `Decimal`. Browser numbers are used only for display/chart percentages. Money rounding for loan postings is explicit half-up to cents. Unit quantities and trade inputs allow at most ten decimal places.
 
-This aggregate is not intended for multiple users or very large histories: replay and full-document writes grow with history. A future schema migration can split accounts/events into tables while preserving the command API. SQLite is used only in isolated unit tests; deployed persistence uses PostgreSQL.
+This aggregate keeps per-user transactions atomic but is not intended for very large histories: replay and full-document writes grow with history. A later migration can split accounts/events into tables while preserving the command API. SQLite is used only in isolated unit tests; deployed persistence uses PostgreSQL.
 
 ## Ledger rules
 
@@ -77,7 +97,7 @@ Account display names are unique. Instruments use exchange-qualified symbols (`N
 
 The `instrument_catalog` relational table is separate from the locked ledger JSON. It stores exchange, symbol, name, class, currency, native venue, source, active state, and refresh timestamp. The worker atomically replaces official US bulk rows daily. Verified LSE and SGX lookups are cached individually. Keeping the catalogue outside the aggregate prevents every financial write from copying thousands of listing records.
 
-The derived `portfolio_history` table stores daily brokerage value, raw change, external flow, and cash-flow-adjusted change in SGD. The worker rebuilds it from the immutable event history plus historical close and FX series. It can therefore be regenerated without changing the financial ledger. Missing historical price or FX data suppresses incomplete account-day snapshots rather than treating an asset as zero.
+The derived `tenant_portfolio_history` table stores each tenant's daily brokerage value, raw change, external flow, and cash-flow-adjusted change in SGD; `portfolio_history` remains for the unclaimed legacy ledger. The worker rebuilds each principal separately from its event history plus historical close and FX series. These snapshots can be regenerated without changing financial ledgers. Missing historical price or FX data suppresses incomplete account-day snapshots rather than treating an asset as zero.
 
 The `stock_cache` table stores normalized successful Stocks query responses by
 canonical security ID and response kind. Provider calls occur outside ledger
@@ -86,7 +106,7 @@ as explicitly stale fallback data after transient provider failures.
 
 ## Command and query API
 
-All endpoints require an owner session or the private bot bearer credential, apart from login and health.
+Financial API calls require a valid Keycloak bearer for tenant selection. Old session and bot credentials may access only the unclaimed legacy ledger, and are rejected once it is claimed. Linked Telegram users use the internal bot financial endpoints described above; service credentials do not choose the tenant. Stock catalog, quotes, and financial-data provider caches remain shared market data.
 
 Every command payload is parsed through a command-specific Pydantic model with unexpected fields forbidden. Pydantic checks the external request shape and nested structures before a database transaction starts; `domain.py` then applies state-dependent financial rules using exact `Decimal` calculations.
 

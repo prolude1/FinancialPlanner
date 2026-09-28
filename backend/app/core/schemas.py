@@ -54,6 +54,13 @@ class Command(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
 
+class TelegramLinkConfirm(Command):
+    challenge: str = Field(min_length=32, max_length=128)
+    telegram_user_id: int = Field(gt=0, le=4503599627370495, strict=True)
+    telegram_chat_id: int = Field(le=4503599627370495, strict=True)
+    chat_type: Literal["private"]
+
+
 class AccountAdd(Command):
     name: str
     type: Literal["bank", "brokerage", "cpf"]

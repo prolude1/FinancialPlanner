@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 import os
+import re
 import secrets
 import time
 from datetime import datetime
@@ -9,13 +10,15 @@ from fastapi import FastAPI, Request, HTTPException, Query
 from fastapi.responses import JSONResponse, Response
 from starlette.middleware.sessions import SessionMiddleware
 from pydantic import ValidationError
+from sqlalchemy import select
 from ..core import store
 from ..core.domain import apply, Invalid, TransactionConflict
 from ..core.finance import time_value
-from ..core.schemas import Login, TimeValue, validate_command
+from ..core.schemas import Login, TimeValue, TelegramLinkConfirm, validate_command
 from ..core.stocks import StockProviderError, service as stock_service
 from ..core.views import dashboard, cashflow_summary
 from ..core import data_workbook
+from ..core import keycloak_identity, telegram_linking
 
 SECRET = os.environ.get("SESSION_SECRET", "")
 if len(SECRET) < 32:
@@ -26,6 +29,7 @@ ORIGIN = os.environ.get("WEB_ORIGIN", "http://localhost:8080").rstrip("/")
 app = FastAPI(docs_url=None, redoc_url=None)
 app.add_middleware(SessionMiddleware, secret_key=SECRET, same_site="strict", max_age=43200, session_cookie="planner_session")
 attempts = {}
+claim_attempts = {}
 
 
 def today():
@@ -45,6 +49,9 @@ def identity(request):
     token = request.headers.get("authorization", "")
     if BOT_SECRET and hmac.compare_digest(token, "Bearer " + BOT_SECRET):
         return "bot"
+    if token.lower().startswith("bearer "):
+        keycloak_principal(request)
+        return "web"
     if request.session.get("owner"):
         return "web"
     raise HTTPException(401, "Sign in to continue")
@@ -66,6 +73,69 @@ def browser_owner(request):
 def browser_mutation(request):
     browser_owner(request)
     csrf(request)
+
+
+def keycloak_principal(request):
+    try:
+        principal = keycloak_identity.principal_from_authorization(request.headers.get("authorization", ""))
+        # Provision an empty tenant on the first verified request. This never
+        # copies legacy data; only the explicit owner-claim operation can do so.
+        store.read_for(principal)
+        return principal
+    except keycloak_identity.IdentityConfigurationError as exc:
+        raise HTTPException(503, detail={"code": "identity_not_configured", "message": str(exc)}) from exc
+    except keycloak_identity.IdentityProviderUnavailable as exc:
+        raise HTTPException(503, detail={"code": "identity_provider_unavailable", "message": str(exc)}) from exc
+    except keycloak_identity.InvalidIdentityToken:
+        raise HTTPException(401, detail={"code": "invalid_access_token", "message": "A valid Keycloak access token is required"}) from None
+
+
+def ledger_access(request):
+    """Return (principal, actor); None principal denotes the unclaimed legacy store."""
+    authorization = request.headers.get("authorization", "")
+    if authorization.lower().startswith("bearer ") and not (BOT_SECRET and hmac.compare_digest(
+            authorization, "Bearer " + BOT_SECRET)):
+        return keycloak_principal(request), "web"
+    actor = identity(request)
+    try:
+        store.assert_legacy_unclaimed()
+    except PermissionError:
+        raise HTTPException(403, detail={"code": "legacy_ledger_claimed",
+            "message": "This legacy session cannot access the claimed ledger; sign in with Keycloak"}) from None
+    return None, actor
+
+
+def telegram_link_bot_secret():
+    secret = os.environ.get("TELEGRAM_LINK_BOT_SECRET", "")
+    legacy_secret = os.environ.get("BOT_API_SECRET", "")
+    if len(secret) < 32 or not secret.isascii() or (legacy_secret and hmac.compare_digest(secret.encode(), legacy_secret.encode())):
+        return None
+    return secret
+
+
+def internal_link_bot(request):
+    secret = telegram_link_bot_secret()
+    if secret is None:
+        raise HTTPException(503, detail={"code": "link_bot_not_configured", "message": "Telegram link confirmation is not configured"})
+    if not hmac.compare_digest(request.headers.get("authorization", ""), "Bearer " + secret):
+        raise HTTPException(401, detail={"code": "internal_auth_required", "message": "Internal bot authentication required"})
+
+
+def linked_bot_principal(request, body):
+    secret = BOT_SECRET
+    if len(secret) < 32 or not hmac.compare_digest(request.headers.get("authorization", ""), "Bearer " + secret):
+        raise HTTPException(401, detail={"code": "internal_auth_required", "message": "Internal bot authentication required"})
+    if (not isinstance(body, dict) or not all(isinstance(body.get(key), int)
+            and not isinstance(body.get(key), bool) and 0 < body[key] <= 4503599627370495
+            for key in ("telegram_user_id", "telegram_chat_id"))
+            or body["telegram_user_id"] != body["telegram_chat_id"]):
+        raise HTTPException(403, detail={"code": "telegram_not_linked", "message": "Link this private Telegram account to continue"})
+    with store.engine.connect() as connection:
+        principal = connection.execute(select(store.telegram_connections.c.principal).where(
+            store.telegram_connections.c.telegram_user_id == body["telegram_user_id"])).scalar_one_or_none()
+    if principal is None:
+        raise HTTPException(403, detail={"code": "telegram_not_linked", "message": "Link this private Telegram account to continue"})
+    return principal, body["telegram_user_id"]
 
 
 def archive_error(exc):
@@ -121,6 +191,175 @@ def session(request: Request):
     return {"csrf": request.session.get("csrf")}
 
 
+@app.post("/api/me/telegram-link/challenge", status_code=201)
+def create_telegram_link_challenge(request: Request, response: Response):
+    principal = keycloak_principal(request)
+    if telegram_link_bot_secret() is None:
+        raise HTTPException(503, detail={"code": "link_bot_not_configured", "message": "Telegram link confirmation is not configured"})
+    bot_username = os.environ.get("TELEGRAM_BOT_USERNAME", "").strip().lstrip("@")
+    if not re.fullmatch(r"[A-Za-z0-9_]{5,32}", bot_username):
+        raise HTTPException(503, detail={"code": "link_bot_not_configured", "message": "Telegram bot username is not configured"})
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        result = telegram_linking.create_challenge(principal)
+        result["bot_url"] = f"https://t.me/{bot_username}?start=link_{result['challenge']}"
+        return result
+    except telegram_linking.TelegramLinkError as exc:
+        raise HTTPException(409, detail={"code": exc.code, "message": str(exc)}) from exc
+
+
+@app.get("/api/me/telegram-link")
+def get_telegram_link_status(request: Request, response: Response):
+    principal = keycloak_principal(request)
+    response.headers["Cache-Control"] = "no-store"
+    return telegram_linking.status(principal)
+
+
+@app.delete("/api/me/telegram-link")
+def unlink_telegram_account(request: Request, response: Response):
+    principal = keycloak_principal(request)
+    response.headers["Cache-Control"] = "no-store"
+    return telegram_linking.unlink(principal)
+
+
+@app.get("/api/me")
+def get_current_user(request: Request, response: Response):
+    principal = keycloak_principal(request)
+    now = int(time.time())
+    with store.engine.connect() as connection:
+        claim = connection.execute(select(store.legacy_claim.c.claimed_by).where(
+            store.legacy_claim.c.id == 1)).scalar_one_or_none()
+        available = (claim is None and connection.execute(select(store.legacy_claim_codes.c.token_hash).where(
+            store.legacy_claim_codes.c.consumed_at.is_(None),
+            store.legacy_claim_codes.c.expires_at > now)).first() is not None)
+    response.headers["Cache-Control"] = "no-store"
+    return {"legacy_claim": {"available": bool(available), "completed": claim == principal}}
+
+
+@app.post("/api/owner-claim", status_code=200)
+async def claim_legacy_ledger(request: Request, response: Response):
+    principal = keycloak_principal(request)
+    response.headers["Cache-Control"] = "no-store"
+    source = request.client.host if request.client else "unknown"
+    attempt_key = (principal, source)
+    now = time.monotonic()
+    recent = [timestamp for timestamp in claim_attempts.get(attempt_key, []) if timestamp > now - 600]
+    claim_attempts[attempt_key] = recent
+    if len(recent) >= 10:
+        raise HTTPException(429, detail={"code": "claim_failed", "message": "Claim code is invalid, expired, or already used"})
+    try:
+        body = await request.json()
+    except (ValueError, UnicodeDecodeError):
+        body = None
+    token = body.get("code") if isinstance(body, dict) and set(body) == {"code"} else None
+    if not isinstance(token, str) or not 30 <= len(token) <= 128:
+        recent.append(now)
+        raise HTTPException(400, detail={"code": "claim_failed", "message": "Claim code is invalid, expired, or already used"})
+    try:
+        result = store.redeem_legacy_claim(principal, token)
+        claim_attempts.pop(attempt_key, None)
+        return result
+    except ValueError:
+        recent.append(now)
+        raise HTTPException(400, detail={"code": "claim_failed", "message": "Claim code is invalid, expired, or already used"}) from None
+
+
+@app.post("/internal/bot/telegram-link/confirm")
+def confirm_telegram_link(payload: TelegramLinkConfirm, request: Request, response: Response):
+    internal_link_bot(request)
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return telegram_linking.confirm_challenge(payload.challenge, payload.telegram_user_id,
+                                                  payload.telegram_chat_id)
+    except telegram_linking.TelegramLinkError as exc:
+        raise HTTPException(409, detail={"code": exc.code, "message": str(exc)}) from exc
+
+
+@app.post("/internal/bot/financial/dashboard")
+async def bot_financial_dashboard(request: Request, response: Response):
+    try:
+        body = await request.json()
+    except (ValueError, UnicodeDecodeError):
+        body = None
+    if not isinstance(body, dict) or set(body) != {"telegram_user_id", "telegram_chat_id"}:
+        raise HTTPException(422, detail={"code": "invalid_bot_request", "message": "Invalid private Telegram request"})
+    principal, telegram_user_id = linked_bot_principal(request, body)
+    try:
+        result = dashboard(store.read_for(principal, telegram_user_id=telegram_user_id), today(), actor="bot")
+    except PermissionError:
+        raise HTTPException(403, detail={"code": "telegram_not_linked", "message": "Link this private Telegram account to continue"}) from None
+    result["portfolio_history"] = store.read_portfolio_history(principal)
+    response.headers["Cache-Control"] = "no-store"
+    return result
+
+
+@app.post("/internal/bot/financial/command/{command}")
+async def bot_financial_command(command: str, request: Request):
+    try:
+        body = await request.json()
+    except (ValueError, UnicodeDecodeError):
+        body = None
+    if (not isinstance(body, dict) or set(body) != {"telegram_user_id", "telegram_chat_id", "payload"}
+            or not isinstance(body.get("payload"), dict)):
+        raise HTTPException(422, detail={"code": "invalid_bot_request", "message": "Invalid private Telegram request"})
+    principal, _ = linked_bot_principal(request, body)
+    try:
+        payload = validate_command(command, body["payload"])
+    except ValidationError as exc:
+        issue = exc.errors(include_url=False)[0]
+        field = ".".join(str(part) for part in issue["loc"]) or "request"
+        raise HTTPException(422, f"Invalid {field}: {issue['msg']}") from exc
+    try:
+        with store.tenant_transaction(principal, telegram_user_id=body["telegram_user_id"]) as state:
+            return apply(state, command, payload, "bot", request.headers.get("idempotency-key", ""), today())
+    except PermissionError:
+        raise HTTPException(403, detail={"code": "telegram_not_linked", "message": "Link this private Telegram account to continue"}) from None
+    except TransactionConflict as exc:
+        raise HTTPException(409, detail=str(exc)) from exc
+    except (KeyError, TypeError) as exc:
+        raise HTTPException(422, "Missing or invalid operation fields") from exc
+
+
+@app.post("/internal/bot/financial/state")
+async def bot_financial_state(request: Request, response: Response):
+    try:
+        body = await request.json()
+    except (ValueError, UnicodeDecodeError):
+        body = None
+    if not isinstance(body, dict) or body.get("action") not in ("get", "set", "clear"):
+        raise HTTPException(422, detail={"code": "invalid_bot_request", "message": "Invalid private Telegram request"})
+    required = {"telegram_user_id", "telegram_chat_id", "action"}
+    state_fields = {"session", "pending_reply", "pending_markup", "last_tvm"}
+    if (body["action"] != "set" and set(body) != required
+            or body["action"] == "set" and (not state_fields.intersection(body) or set(body) - required - state_fields)):
+        raise HTTPException(422, detail={"code": "invalid_bot_request", "message": "Invalid private Telegram request"})
+    principal, telegram_user_id = linked_bot_principal(request, body)
+    response.headers["Cache-Control"] = "no-store"
+    if body["action"] == "clear":
+        try:
+            store.write_telegram_user_state(principal, telegram_user_id,
+                {"session": None, "pending_reply": None, "pending_markup": None, "last_tvm": None})
+        except PermissionError:
+            raise HTTPException(403, detail={"code": "telegram_not_linked", "message": "Link this private Telegram account to continue"}) from None
+        return {"session": None, "pending_reply": None, "pending_markup": None, "last_tvm": None}
+    if body["action"] == "get":
+        try:
+            return store.read_telegram_user_state(principal, telegram_user_id)
+        except PermissionError:
+            raise HTTPException(403, detail={"code": "telegram_not_linked", "message": "Link this private Telegram account to continue"}) from None
+    patch = {key: body[key] for key in state_fields if key in body}
+    if ("session" in patch and patch["session"] is not None and not isinstance(patch["session"], dict)
+            or "pending_reply" in patch and patch["pending_reply"] is not None and not isinstance(patch["pending_reply"], str)
+            or "pending_markup" in patch and patch["pending_markup"] is not None and not isinstance(patch["pending_markup"], dict)
+            or "last_tvm" in patch and patch["last_tvm"] is not None and not isinstance(patch["last_tvm"], dict)):
+        raise HTTPException(422, detail={"code": "invalid_bot_request", "message": "Invalid private Telegram state"})
+    try:
+        value = store.patch_telegram_user_state(principal, telegram_user_id, patch)
+    except PermissionError:
+        raise HTTPException(403, detail={"code": "telegram_not_linked", "message": "Link this private Telegram account to continue"}) from None
+    return value
+
+
 @app.post("/api/logout")
 def logout(request: Request):
     csrf(request)
@@ -130,16 +369,16 @@ def logout(request: Request):
 
 @app.get("/api/revision")
 def revision(request: Request):
-    identity(request)
-    s = store.read()
+    principal, _ = ledger_access(request)
+    s = store.read_for(principal) if principal else store.read_legacy()
     return {"revision": s["revision"], "date": str(today())}
 
 
 @app.get("/api/data-export")
 def export_data(request: Request):
-    browser_owner(request)
+    principal = keycloak_principal(request)
     try:
-        content, manifest = data_workbook.snapshot_bytes()
+        content, manifest = data_workbook.snapshot_bytes(principal=principal)
     except data_workbook.WorkbookError as exc:
         raise archive_error(exc) from exc
     stamp = datetime.now(ZoneInfo(os.environ.get("APP_TIMEZONE", "Asia/Singapore"))).strftime("%Y%m%d-%H%M%S")
@@ -150,7 +389,7 @@ def export_data(request: Request):
 
 @app.get("/api/data-template")
 def data_template(request: Request):
-    browser_owner(request)
+    keycloak_principal(request)
     try:
         content, _ = data_workbook.template_bytes()
     except data_workbook.WorkbookError as exc:
@@ -162,7 +401,7 @@ def data_template(request: Request):
 
 @app.post("/api/data-import/validate")
 async def validate_data_import(request: Request):
-    browser_mutation(request)
+    principal = keycloak_principal(request)
     content_length = request.headers.get("content-length")
     if content_length and int(content_length) > data_workbook.MAX_UPLOAD_BYTES + 1024 * 1024:
         raise HTTPException(413, detail={"code": "upload_too_large", "message": "Workbook exceeds the 64 MiB upload limit"})
@@ -176,14 +415,14 @@ async def validate_data_import(request: Request):
     if len(content) > data_workbook.MAX_UPLOAD_BYTES:
         raise HTTPException(413, detail={"code": "upload_too_large", "message": "Workbook exceeds the 64 MiB upload limit"})
     try:
-        return data_workbook.validate_workbook(content)
+        return data_workbook.validate_workbook(content, principal=principal)
     except data_workbook.WorkbookError as exc:
         raise archive_error(exc) from exc
 
 
 @app.post("/api/data-import/commit")
 async def commit_data_import(request: Request):
-    browser_mutation(request)
+    principal = keycloak_principal(request)
     try:
         body = await request.json()
     except (ValueError, UnicodeDecodeError):
@@ -192,32 +431,34 @@ async def commit_data_import(request: Request):
         raise HTTPException(422, detail={"code": "invalid_confirmation", "message": "Provide archive_sha256, current_revision, current_etag, and confirmation_token"})
     try:
         return data_workbook.commit_import(body["archive_sha256"], body["current_revision"],
-                                          body["current_etag"], body["confirmation_token"])
+                                          body["current_etag"], body["confirmation_token"], principal=principal)
     except data_workbook.WorkbookError as exc:
         raise archive_error(exc) from exc
 
 
 @app.get("/api/dashboard")
 def get_dashboard(request: Request):
-    actor = identity(request)
-    result = dashboard(store.read(), today(), actor=actor)
-    result["portfolio_history"] = store.read_portfolio_history()
+    principal, actor = ledger_access(request)
+    snapshot = store.read_for(principal) if principal else store.read_legacy()
+    result = dashboard(snapshot, today(), actor=actor)
+    result["portfolio_history"] = store.read_portfolio_history(principal)
     return result
 
 
 @app.get("/api/cashflow")
 def get_cashflow(request: Request, year: int | None = Query(default=None, ge=1970, le=9999)):
-    identity(request)
+    principal, _ = ledger_access(request)
     current = today()
     if year is not None and year > current.year:
         raise HTTPException(422, "Future calendar years are not available")
-    return cashflow_summary(store.read(), current, year=year)
+    snapshot = store.read_for(principal) if principal else store.read_legacy()
+    return cashflow_summary(snapshot, current, year=year)
 
 
 @app.post("/api/calculators/time-value")
 def calculate_time_value(payload: TimeValue, request: Request):
     actor = identity(request)
-    if actor == "web":
+    if actor == "web" and not request.headers.get("authorization", "").lower().startswith("bearer "):
         csrf(request)
     return time_value(payload.model_dump(exclude_none=True))
 
@@ -269,8 +510,8 @@ def stock_latest_earnings(security_id: str, request: Request):
 
 @app.post("/api/commands/{command}")
 async def mutate(command: str, request: Request):
-    actor = identity(request)
-    if actor == "web":
+    principal, actor = ledger_access(request)
+    if actor == "web" and principal is None:
         csrf(request)
     body = await request.json()
     if not isinstance(body, dict):
@@ -282,7 +523,7 @@ async def mutate(command: str, request: Request):
         field = ".".join(str(part) for part in issue["loc"]) or "request"
         raise HTTPException(422, f"Invalid {field}: {issue['msg']}") from exc
     try:
-        with store.transaction() as s:
+        with (store.tenant_transaction(principal) if principal else store.transaction()) as s:
             return apply(s, command, body, actor, request.headers.get("idempotency-key", ""), today())
     except TransactionConflict as exc:
         raise HTTPException(409, detail=str(exc)) from exc

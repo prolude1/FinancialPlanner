@@ -1,6 +1,16 @@
+FROM node:22-alpine AS frontend-build
+WORKDIR /build
+COPY package.json package-lock.json ./
+RUN npm ci
+COPY telegram-link-entry.js telegram-link-ui.js dashboard-auth-entry.js dashboard-auth.js ./
+RUN npm run build
+
 FROM nginxinc/nginx-unprivileged:1.30.5-alpine3.24
 USER root
 RUN apk upgrade --no-cache
 USER 101
-COPY nginx.conf /etc/nginx/conf.d/default.conf
-COPY index.html app.js data-management.js stocks.js calculator.js cashflow.js activity.js style.css data-management.css stocks.css calculator.css activity.css /usr/share/nginx/html/
+ENV NGINX_ENVSUBST_FILTER="^(KEYCLOAK_ORIGIN|KEYCLOAK_ISSUER|KEYCLOAK_REALM|KEYCLOAK_WEB_CLIENT_ID)$"
+COPY nginx.conf.template /etc/nginx/templates/default.conf.template
+COPY index.html telegram-link.html app.js data-management.js stocks.js calculator.js cashflow.js activity.js style.css data-management.css stocks.css calculator.css activity.css telegram-link.css /usr/share/nginx/html/
+COPY --from=frontend-build /build/dist/telegram-link.bundle.js /usr/share/nginx/html/dist/telegram-link.bundle.js
+COPY --from=frontend-build /build/dist/dashboard-auth.bundle.js /usr/share/nginx/html/dist/dashboard-auth.bundle.js
