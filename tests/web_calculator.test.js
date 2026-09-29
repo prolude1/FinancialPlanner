@@ -4,7 +4,7 @@ const vm = require('vm');
 
 const context = vm.createContext({console, URLSearchParams, AbortController, queueMicrotask: () => {}});
 const sharedSource = fs.readFileSync('web/app.js', 'utf8').split("document.addEventListener('click'")[0];
-vm.runInContext(fs.readFileSync('web/calculator.js', 'utf8'), context);
+vm.runInContext(fs.readFileSync('web/features/calculator/calculator.js', 'utf8'), context);
 vm.runInContext(sharedSource, context);
 
 assert.equal(vm.runInContext(`contributionWindowSummary({cashflow_start_years:'0',cashflow_start_remainder_months:'0',cashflow_end_mode:'plan'})`, context), 'Contributions: entire plan');

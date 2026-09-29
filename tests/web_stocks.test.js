@@ -4,7 +4,7 @@ const vm = require('vm');
 
 const context = vm.createContext({console, URLSearchParams, AbortController, queueMicrotask: () => {}});
 const sharedSource = fs.readFileSync('web/app.js', 'utf8').split("document.addEventListener('click'")[0];
-vm.runInContext(fs.readFileSync('web/stocks.js', 'utf8'), context);
+vm.runInContext(fs.readFileSync('web/features/stocks/stocks.js', 'utf8'), context);
 vm.runInContext(sharedSource, context);
 
 vm.runInContext(`stockState={query:'ABC',exchange:'',results:[
@@ -31,8 +31,8 @@ assert(chart.includes('Daily candlestick chart'));
 assert(chart.includes('Completed daily sessions only'));
 assert(chart.includes('stock-candle-hover'));
 assert(chart.includes('aria-live="polite"'));
-assert(fs.readFileSync('web/stocks.js','utf8').includes('candle-tooltip-close'));
-const stockCss=fs.readFileSync('web/stocks.css','utf8');
+assert(fs.readFileSync('web/features/stocks/stocks.js','utf8').includes('candle-tooltip-close'));
+const stockCss=fs.readFileSync('web/features/stocks/stocks.css','utf8');
 const compactStockCss=stockCss.replace(/\s/g,'');
 assert(compactStockCss.includes('width:260px;max-width:calc(100%-20px)'));
 assert(compactStockCss.includes('font-size:16px'));

@@ -3,7 +3,7 @@ const fs = require('fs');
 const vm = require('vm');
 
 const context=vm.createContext({console,URLSearchParams,AbortController,queueMicrotask:()=>{},crypto:{randomUUID:()=> 'idempotency-test'}});
-vm.runInContext(fs.readFileSync('web/activity.js','utf8'),context);
+vm.runInContext(fs.readFileSync('web/features/activity/activity.js','utf8'),context);
 const shared=fs.readFileSync('web/app.js','utf8').split("document.addEventListener('click'")[0];
 vm.runInContext(shared,context);
 
@@ -29,7 +29,7 @@ const fixture={
 };
 context.testData=fixture;
 vm.runInContext('data=testData',context);
-vm.runInContext(fs.readFileSync('web/cashflow.js','utf8'),context);
+vm.runInContext(fs.readFileSync('web/features/cashflow/cashflow.js','utf8'),context);
 
 const table=vm.runInContext('historyTable(data.history,{manage:true})',context);
 for(const label of ['Search','Account','Transaction type','Status','From','To','Clear filters','Edit','Cancel'])assert(table.includes(label));
@@ -73,12 +73,10 @@ assert(creditFields.includes('name="card"'));
 assert(creditFields.includes('name="credit_account"'));
 assert.equal(vm.runInContext("transactionRestriction({...creditPurchase,can_edit:false},'edited')",context),'This transaction is locked against editing by the ledger.');
 assert.equal(vm.runInContext("transactionRestriction({kind:'credit_set',status:'active',data:{},can_edit:true},'edited')",context),'This legacy combined balance entry is read-only; correct the underlying purchase, refund, or payment instead.');
-assert(fs.readFileSync('web/index.html','utf8').includes('/activity.js'));
-assert(fs.readFileSync('web/index.html','utf8').includes('/cashflow.js'));
+assert(fs.readFileSync('web/index.html','utf8').includes('/features/activity/activity.js'));
+assert(fs.readFileSync('web/index.html','utf8').includes('/features/cashflow/cashflow.js'));
 const dockerfile=fs.readFileSync('web/Dockerfile','utf8');
-assert(dockerfile.includes('activity.js'));
-assert(dockerfile.includes('activity.css'));
-assert(dockerfile.includes('cashflow.js'));
+assert(dockerfile.includes('COPY features/ /usr/share/nginx/html/features/'));
 
 const cashflowFixture={currency:'SGD',months:[{month:'2026-09',inflow:'1200.00',outflow:'350.00',net:'850.00',internal_transfer_in:'500.00',internal_transfer_out:'500.00',by_kind:[{kind:'deposit',inflow:'1200.00',outflow:'0',internal_transfer_in:'0',internal_transfer_out:'0',transactions:[{id:'tx-correction',date:'2026-09-02',account:'bank-1',account_name:'Everyday account',amount:'1200.00',description:'Salary'}]},{kind:'transfer',inflow:'0',outflow:'0',internal_transfer_in:'500.00',internal_transfer_out:'500.00',transactions:[{id:'tx-transfer',date:'2026-09-03',account:'bank-1',account_name:'Everyday account',amount:'500.00',direction:'out'},{id:'tx-transfer',date:'2026-09-03',account:'bank-2',account_name:'Savings',amount:'500.00',direction:'in'}]}],by_account:[{account:'bank-1',account_name:'Everyday account',inflow:'1200.00',outflow:'350.00',internal_transfer_in:'0',internal_transfer_out:'500.00',transactions:[{id:'tx-correction',kind:'deposit',date:'2026-09-02',amount:'1200.00'},{id:'tx-transfer',kind:'transfer',date:'2026-09-03',amount:'500.00',direction:'out'}]}]}]};
 cashflowFixture.months.unshift({month:'2026-08',inflow:'0',outflow:'0',net:'0',internal_transfer_in:'0',internal_transfer_out:'0',by_kind:[],by_account:[]});
@@ -126,13 +124,21 @@ fixture.history.push({id:'tx-repayment',kind:'repayment',date:'2026-05-01',statu
 const allocationRow={querySelector(selector){return selector==='select'?{value:'bank-1'}:{value:'55.00'};}};
 const paymentForm={dataset:{},elements:{amount:{value:'55.00'},date:{value:'2026-05-02'}},querySelectorAll(){return [allocationRow];}};
 context.document={querySelector(selector){return selector==='#payment-form'?paymentForm:null;}};
-  vm.runInContext(`repay('loan-1','tx-repayment')`,context);
+
+(async()=>{
+  const {createLoanForms}=await import('../web/features/loans/loan-forms.js');
+  const loanForms=createLoanForms({
+    $:selector=>context.document.querySelector(selector),
+    esc:value=>String(value??''),fmt:value=>String(value??''),
+    input:(name)=>`<input name="${name}">`,openModal:()=>{},formFooter:()=>'',
+    submitCommand:(...args)=>{submittedCommand={command:args[0],payload:args[1],form:args[2]};},
+  });
+  loanForms.setData(fixture);
+  loanForms.repay('loan-1','tx-repayment');
   paymentForm.onsubmit({preventDefault(){},target:paymentForm});
   assert.equal(submittedCommand.command,'correct');
   assert.deepEqual(JSON.parse(JSON.stringify(submittedCommand.payload)),{transaction:'tx-repayment',changes:{amount:'55.00',allocations:[{account:'bank-1',amount:'55.00'}],date:'2026-05-02'}});
   context.submitCommand=actualSubmitCommand;
-
-(async()=>{
   const formError={textContent:''},modal={close(){}},toast={hidden:true,textContent:''},row={focus(){this.focused=true;},scrollIntoView(){}};
   context.document={querySelector(selector){if(selector==='#form-error')return formError;if(selector==='#modal')return modal;if(selector==='#toast')return toast;return null;},getElementById(){return row;}};
   context.rejectCommand=async()=>{throw Object.assign(Error('Transaction is no longer active; refresh history and retry'),{status:409});};
@@ -142,7 +148,7 @@ context.document={querySelector(selector){return selector==='#payment-form'?paym
   const conflictForm={dataset:{transactionManagement:'true',transactionId:'tx-transfer'},querySelector(){return {disabled:false};}};
   context.conflictForm=conflictForm;
   await vm.runInContext(`submitCommand('correct',{transaction:'tx-transfer',changes:{amount:'120.00'}},conflictForm)`,context);
-  assert(formError.textContent.includes('changed elsewhere'));
+  assert(formError.textContent.includes('changed elsewhere'),formError.textContent||'no form error was written');
   assert.equal(context.loadCount,1,'a stale correction refreshes the dashboard history');
   console.log('PASS: Transaction-history filters and editing, bank cash-flow breakdowns, currency separation, and stale conflicts');
 })().catch(error=>{console.error(error);process.exitCode=1;});

@@ -1,6 +1,7 @@
 {
   "name": "financial-planner-web-auth",
   "private": true,
+  "type": "module",
   "scripts": {
     "build": "esbuild telegram-link-entry.js --bundle --format=iife --target=es2020 --outfile=dist/telegram-link.bundle.js && esbuild dashboard-auth-entry.js --bundle --format=iife --target=es2020 --outfile=dist/dashboard-auth.bundle.js"
   },

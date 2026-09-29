@@ -18,7 +18,7 @@ const context=vm.createContext({
   location:{hash:'#data-management'},
 });
 const sharedSource=fs.readFileSync('web/app.js','utf8').split("document.addEventListener('click'")[0];
-vm.runInContext(fs.readFileSync('web/data-management.js','utf8'),context);
+vm.runInContext(fs.readFileSync('web/features/data-management/data-management.js','utf8'),context);
 vm.runInContext(sharedSource,context);
 vm.runInContext(`render=()=>{};load=async()=>{};api=async()=>({})`,context);
 
@@ -35,7 +35,7 @@ const preview={archive_sha256:'abc123',current_revision:7,current_etag:'etag456'
   assert(managementPage.includes('accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"'));
   assert(managementPage.includes('restore the application from a backup workbook'));
   assert(!/\.zip|JSON/i.test(managementPage),'management UI contains no ZIP or JSON file guidance');
-  const managementCss=fs.readFileSync('web/data-management.css','utf8');
+  const managementCss=fs.readFileSync('web/features/data-management/data-management.css','utf8');
   assert(managementCss.includes('.data-actions button,.data-actions .file-picker'));
   assert(managementCss.includes('height:46px'));
   assert(managementCss.includes('padding:0 18px'));

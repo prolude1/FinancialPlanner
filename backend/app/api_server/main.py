@@ -9,16 +9,24 @@ from zoneinfo import ZoneInfo
 from fastapi import FastAPI, Request, HTTPException, Query
 from fastapi.responses import JSONResponse, Response
 from starlette.middleware.sessions import SessionMiddleware
-from pydantic import ValidationError
 from sqlalchemy import select
 from ..core import store
-from ..core.domain import apply, Invalid, TransactionConflict
+from ..core.domain import apply, Invalid
 from ..core.finance import time_value
 from ..core.schemas import Login, TimeValue, TelegramLinkConfirm, validate_command
+from ..core.command_service import (
+    CommandConflictError,
+    CommandFieldsError,
+    CommandPayloadError,
+    FinancialCommandService,
+)
 from ..core.stocks import StockProviderError, service as stock_service
+from ..core.ledger_service import FinancialLedgerService
 from ..core.views import dashboard, cashflow_summary
 from ..core import data_workbook
 from ..core import keycloak_identity, telegram_linking
+
+ledger_service = FinancialLedgerService(store)
 
 SECRET = os.environ.get("SESSION_SECRET", "")
 if len(SECRET) < 32:
@@ -34,6 +42,30 @@ claim_attempts = {}
 
 def today():
     return datetime.now(ZoneInfo(os.environ.get("APP_TIMEZONE", "Asia/Singapore"))).date()
+
+
+command_service = FinancialCommandService(
+    ledger_service, apply, validate_command, today
+)
+
+
+def apply_financial_command(command, payload, *, principal, actor, idempotency_key,
+                            telegram_user_id=None):
+    try:
+        return command_service.execute(
+            command,
+            payload,
+            principal=principal,
+            actor=actor,
+            idempotency_key=idempotency_key,
+            telegram_user_id=telegram_user_id,
+        )
+    except CommandPayloadError as exc:
+        raise HTTPException(422, f"Invalid {exc.field}: {exc}") from exc
+    except CommandConflictError as exc:
+        raise HTTPException(409, detail=str(exc)) from exc
+    except CommandFieldsError as exc:
+        raise HTTPException(422, str(exc)) from exc
 
 
 def verify_password(password):
@@ -75,13 +107,12 @@ def browser_mutation(request):
     csrf(request)
 
 
-def keycloak_principal(request):
+def verified_keycloak_principal(request):
+    """Validate the bearer and derive the stable principal without storage I/O."""
     try:
-        principal = keycloak_identity.principal_from_authorization(request.headers.get("authorization", ""))
-        # Provision an empty tenant on the first verified request. This never
-        # copies legacy data; only the explicit owner-claim operation can do so.
-        store.read_for(principal)
-        return principal
+        return keycloak_identity.principal_from_authorization(
+            request.headers.get("authorization", "")
+        )
     except keycloak_identity.IdentityConfigurationError as exc:
         raise HTTPException(503, detail={"code": "identity_not_configured", "message": str(exc)}) from exc
     except keycloak_identity.IdentityProviderUnavailable as exc:
@@ -90,12 +121,21 @@ def keycloak_principal(request):
         raise HTTPException(401, detail={"code": "invalid_access_token", "message": "A valid Keycloak access token is required"}) from None
 
 
+def keycloak_principal(request):
+    """Validate Keycloak identity and preserve first-request tenant provisioning."""
+    principal = verified_keycloak_principal(request)
+    # Non-ledger endpoints historically provision on a user's first verified
+    # request. Ledger routes provision/read through their single service call.
+    ledger_service.read(principal)
+    return principal
+
+
 def ledger_access(request):
     """Return (principal, actor); None principal denotes the unclaimed legacy store."""
     authorization = request.headers.get("authorization", "")
     if authorization.lower().startswith("bearer ") and not (BOT_SECRET and hmac.compare_digest(
             authorization, "Bearer " + BOT_SECRET)):
-        return keycloak_principal(request), "web"
+        return verified_keycloak_principal(request), "web"
     actor = identity(request)
     try:
         store.assert_legacy_unclaimed()
@@ -285,10 +325,13 @@ async def bot_financial_dashboard(request: Request, response: Response):
         raise HTTPException(422, detail={"code": "invalid_bot_request", "message": "Invalid private Telegram request"})
     principal, telegram_user_id = linked_bot_principal(request, body)
     try:
-        result = dashboard(store.read_for(principal, telegram_user_id=telegram_user_id), today(), actor="bot")
+        result = dashboard(
+            ledger_service.read(principal, telegram_user_id=telegram_user_id),
+            today(), actor="bot",
+        )
     except PermissionError:
         raise HTTPException(403, detail={"code": "telegram_not_linked", "message": "Link this private Telegram account to continue"}) from None
-    result["portfolio_history"] = store.read_portfolio_history(principal)
+    result["portfolio_history"] = ledger_service.portfolio_history(principal)
     response.headers["Cache-Control"] = "no-store"
     return result
 
@@ -304,20 +347,16 @@ async def bot_financial_command(command: str, request: Request):
         raise HTTPException(422, detail={"code": "invalid_bot_request", "message": "Invalid private Telegram request"})
     principal, _ = linked_bot_principal(request, body)
     try:
-        payload = validate_command(command, body["payload"])
-    except ValidationError as exc:
-        issue = exc.errors(include_url=False)[0]
-        field = ".".join(str(part) for part in issue["loc"]) or "request"
-        raise HTTPException(422, f"Invalid {field}: {issue['msg']}") from exc
-    try:
-        with store.tenant_transaction(principal, telegram_user_id=body["telegram_user_id"]) as state:
-            return apply(state, command, payload, "bot", request.headers.get("idempotency-key", ""), today())
+        return apply_financial_command(
+            command,
+            body["payload"],
+            principal=principal,
+            actor="bot",
+            idempotency_key=request.headers.get("idempotency-key", ""),
+            telegram_user_id=body["telegram_user_id"],
+        )
     except PermissionError:
         raise HTTPException(403, detail={"code": "telegram_not_linked", "message": "Link this private Telegram account to continue"}) from None
-    except TransactionConflict as exc:
-        raise HTTPException(409, detail=str(exc)) from exc
-    except (KeyError, TypeError) as exc:
-        raise HTTPException(422, "Missing or invalid operation fields") from exc
 
 
 @app.post("/internal/bot/financial/state")
@@ -370,7 +409,7 @@ def logout(request: Request):
 @app.get("/api/revision")
 def revision(request: Request):
     principal, _ = ledger_access(request)
-    s = store.read_for(principal) if principal else store.read_legacy()
+    s = ledger_service.read(principal)
     return {"revision": s["revision"], "date": str(today())}
 
 
@@ -439,9 +478,9 @@ async def commit_data_import(request: Request):
 @app.get("/api/dashboard")
 def get_dashboard(request: Request):
     principal, actor = ledger_access(request)
-    snapshot = store.read_for(principal) if principal else store.read_legacy()
+    snapshot = ledger_service.read(principal)
     result = dashboard(snapshot, today(), actor=actor)
-    result["portfolio_history"] = store.read_portfolio_history(principal)
+    result["portfolio_history"] = ledger_service.portfolio_history(principal)
     return result
 
 
@@ -451,7 +490,7 @@ def get_cashflow(request: Request, year: int | None = Query(default=None, ge=197
     current = today()
     if year is not None and year > current.year:
         raise HTTPException(422, "Future calendar years are not available")
-    snapshot = store.read_for(principal) if principal else store.read_legacy()
+    snapshot = ledger_service.read(principal)
     return cashflow_summary(snapshot, current, year=year)
 
 
@@ -516,16 +555,10 @@ async def mutate(command: str, request: Request):
     body = await request.json()
     if not isinstance(body, dict):
         raise HTTPException(422, "Expected an object")
-    try:
-        body = validate_command(command, body)
-    except ValidationError as exc:
-        issue = exc.errors(include_url=False)[0]
-        field = ".".join(str(part) for part in issue["loc"]) or "request"
-        raise HTTPException(422, f"Invalid {field}: {issue['msg']}") from exc
-    try:
-        with (store.tenant_transaction(principal) if principal else store.transaction()) as s:
-            return apply(s, command, body, actor, request.headers.get("idempotency-key", ""), today())
-    except TransactionConflict as exc:
-        raise HTTPException(409, detail=str(exc)) from exc
-    except (KeyError, TypeError) as exc:
-        raise HTTPException(422, "Missing or invalid operation fields") from exc
+    return apply_financial_command(
+        command,
+        body,
+        principal=principal,
+        actor=actor,
+        idempotency_key=request.headers.get("idempotency-key", ""),
+    )

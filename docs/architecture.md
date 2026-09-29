@@ -108,6 +108,25 @@ as explicitly stale fallback data after transient provider failures.
 
 Financial API calls require a valid Keycloak bearer for tenant selection. Old session and bot credentials may access only the unclaimed legacy ledger, and are rejected once it is claimed. Linked Telegram users use the internal bot financial endpoints described above; service credentials do not choose the tenant. Stock catalog, quotes, and financial-data provider caches remain shared market data.
 
+`api_server/main.py` validates request identity and maps HTTP errors. Ledger
+reads and writes then pass through `FinancialLedgerService` in
+`core/ledger_service.py`, which selects the tenant or unclaimed legacy storage
+path and preserves Telegram link checks. `verified_keycloak_principal()` is
+storage-free; routes that read or write a ledger provision it through the
+service once. Other authenticated routes keep `keycloak_principal()` so their
+existing first-request tenant provisioning behavior is unchanged. The browser
+uses `web/core/api-client.js` for authenticated API transport and JSON error
+decoding; feature code continues to call the shared `api()` adapter in
+`web/app.js`. Browser screen code and its styles live under
+`web/features/{activity,calculator,cashflow,dashboard,data-management,loans,stocks}`; Nginx
+serves these files from their feature paths.
+
+Both browser and Telegram financial commands use `FinancialCommandService` in
+`core/command_service.py` for schema validation, ledger transactions, and
+domain application. The API layer translates its typed failures into HTTP
+responses. The worker's `LedgerBatchRefresher` centralizes tenant enumeration
+and the claimed-legacy gate while each refresh job retains its own retry policy.
+
 Every command payload is parsed through a command-specific Pydantic model with unexpected fields forbidden. Pydantic checks the external request shape and nested structures before a database transaction starts; `domain.py` then applies state-dependent financial rules using exact `Decimal` calculations.
 
 | Endpoint | Behavior |

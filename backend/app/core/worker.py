@@ -15,6 +15,47 @@ stock_price_provider = StockPriceProviderFactory.create(
     os.environ.get("STOCK_PRICE_PROVIDER", "yahoo"))
 
 
+class LedgerBatchRefresher:
+    """Run one refresh operation against each tenant and then legacy data.
+
+    The caller supplies the single-ledger operation because market values and
+    portfolio history have different retry policies. Ledger enumeration and
+    the claimed-legacy gate stay consistent between both scheduled jobs.
+    """
+
+    def __init__(self, repository=store, logger=logging):
+        self._repository = repository
+        self._logger = logger
+
+    def run(
+        self,
+        refresh_one,
+        *,
+        tenant_errors_are_isolated=False,
+        sum_results=False,
+        failure_message="Ledger refresh failed for a tenant",
+    ):
+        results = []
+        for principal in self._repository.tenant_principals():
+            try:
+                results.append(refresh_one(principal))
+            except Exception:
+                if not tenant_errors_are_isolated:
+                    raise
+                self._logger.warning("%s; retrying on next cycle", failure_message)
+
+        try:
+            self._repository.assert_legacy_unclaimed()
+        except PermissionError:
+            return sum(results) if sum_results else None
+
+        results.append(refresh_one())
+        return sum(results) if sum_results else None
+
+
+ledger_batch_refresher = LedgerBatchRefresher()
+
+
 def provider_symbol(exchange, symbol):
     return stock_price_provider.provider_symbol(exchange, symbol)
 
@@ -185,15 +226,7 @@ def refresh_portfolio_history(principal=None):
 
 def refresh_all_portfolio_history():
     """Refresh each financial history independently; never combine tenant events."""
-    counts = []
-    for principal in store.tenant_principals():
-        counts.append(refresh_portfolio_history(principal))
-    try:
-        store.assert_legacy_unclaimed()
-    except PermissionError:
-        return sum(counts)
-    counts.append(refresh_portfolio_history())
-    return sum(counts)
+    return ledger_batch_refresher.run(refresh_portfolio_history, sum_results=True)
 
 
 def refresh(principal=None):
@@ -228,16 +261,11 @@ def refresh(principal=None):
 
 def refresh_all_ledgers():
     """Refresh caches/history per ledger; shared market providers are read-only inputs."""
-    for principal in store.tenant_principals():
-        try:
-            refresh(principal)
-        except Exception:
-            logging.warning("Market refresh failed for a tenant; retrying on next cycle")
-    try:
-        store.assert_legacy_unclaimed()
-    except PermissionError:
-        return
-    refresh()
+    ledger_batch_refresher.run(
+        refresh,
+        tenant_errors_are_isolated=True,
+        failure_message="Market refresh failed for a tenant",
+    )
 
 
 def run_due(last_attempt, interval, action, label, now=None):
