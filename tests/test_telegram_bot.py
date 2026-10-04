@@ -4,7 +4,23 @@ from pathlib import Path
 from unittest.mock import Mock
 import pytest
 
-from app.telegram_bot.client import BackendClient
+from app.telegram_bot.client import BackendClient, send_handler_reply
+
+
+def test_handler_reply_includes_saved_inline_keyboard():
+    telegram = Mock()
+    telegram.post.return_value = Mock()
+    keyboard = {"inline_keyboard": [[{"text": "Accounts", "callback_data": "cmd:accounts"}]]}
+
+    send_handler_reply(telegram, "https://telegram.test/bot/", 303, "Choose an action", {
+        "pending_markup": keyboard,
+    })
+
+    telegram.post.assert_called_once_with(
+        "https://telegram.test/bot/sendMessage",
+        json={"chat_id": 303, "text": "Choose an action", "entities": [],
+              "reply_markup": keyboard},
+    )
 
 
 def test_backend_client_uses_sender_identity_for_scoped_financial_calls(monkeypatch):

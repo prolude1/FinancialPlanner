@@ -530,13 +530,16 @@ def handle(update, actor_id, query, mutate, load_state, save_state,
             session["data"]["price"] = parts[1]
         money_shortcut = False
         if field in ("money", "received_money"):
-            match = re.fullmatch(r"\s*(SGD|USD)\s+(\d+(?:\.\d+)?)\s*", text, re.IGNORECASE)
+            amount_pattern = r"(?:\d+|\d{1,3}(?:,\d{3})+)(?:\.\d+)?"
+            match = re.fullmatch(rf"\s*(SGD|USD)\s*({amount_pattern})\s*", text, re.IGNORECASE)
             if not match:
                 result = ("Enter currency and amount together using SGD or USD, "
-                          "for example SGD 100 or USD 25.50. Please retry.\n" + prompt(session, state))
+                          "for example SGD100, SGD 1,234.50, or USD25.50. Please retry.\n"
+                          + prompt(session, state))
                 save_state(session=session, pending_reply=result, pending_markup=session_keyboard(session, state))
                 return result
             currency_code, amount = match.groups()
+            amount = amount.replace(",", "")
             if field == "money":
                 session["data"]["currency"] = currency_code.upper()
                 session["data"]["amount"] = amount

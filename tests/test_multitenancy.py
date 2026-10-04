@@ -199,7 +199,7 @@ def test_worker_rebuilds_histories_per_principal_without_crossing_data(isolated_
 
 
 def test_financial_routes_derive_tenant_only_from_authenticated_principal(isolated_store, monkeypatch):
-    monkeypatch.setattr(api, "keycloak_principal", lambda request: request.headers["Authorization"].split()[-1])
+    monkeypatch.setattr(api, "verified_keycloak_principal", lambda request: request.headers["Authorization"].split()[-1])
     client = TestClient(api.app)
     headers_a = {"Authorization": "Bearer owner-a"}
     headers_b = {"Authorization": "Bearer owner-b"}
@@ -219,7 +219,7 @@ def test_legacy_password_and_bot_credentials_cannot_read_claimed_tenant(isolated
     with store.tenant_transaction("owner-a") as state:
         state["accounts"]["owned"] = {"id": "owned", "name": "Private", "type": "bank",
             "currency": "SGD", "cpf_type": "", "archived": False}
-    monkeypatch.setattr(api, "keycloak_principal", lambda request: request.headers["Authorization"].split()[-1])
+    monkeypatch.setattr(api, "verified_keycloak_principal", lambda request: request.headers["Authorization"].split()[-1])
     client = TestClient(api.app)
     login = client.post("/api/login", json={"password": "test-password"},
         headers={"Origin": "http://localhost:8080"})

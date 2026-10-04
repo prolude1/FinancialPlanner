@@ -132,9 +132,91 @@ def cashflow_summary(s, today, year=None):
         bucket["totals"] = {key: str(value) for key, value in totals.items()}
         bucket["months"] = months_out
         output[cur] = bucket
+    credit_card_spending = _credit_card_spending_summary(s, today, months)
     return {"as_of": str(today), "selection": {"type": selection, "year": year,
             "start_month": months[0], "end_month": months[-1], "current_month_partial": partial},
-            "currencies": output}
+            "currencies": output, "credit_card_spending": credit_card_spending}
+
+
+def _credit_card_spending_summary(s, today, months):
+    """Summarize card purchases and refunds by transaction date, not payment date."""
+    month_set = set(months)
+    currencies = {}
+
+    def new_month(month):
+        return {"month": month, "purchases": Decimal(0), "refunds": Decimal(0),
+                "net_spending": Decimal(0), "transactions": [], "by_card": {}}
+
+    def new_series(currency):
+        totals = {"purchases": Decimal(0), "refunds": Decimal(0), "net_spending": Decimal(0)}
+        return {"currency": currency, "totals": totals,
+                "months": {month: new_month(month) for month in months}}
+
+    for event in s.get("events", []):
+        kind = event.get("kind")
+        if event.get("status") != "active" or kind not in ("credit_purchase", "credit_refund"):
+            continue
+        when = date.fromisoformat(event["date"])
+        month = when.strftime("%Y-%m")
+        if when > today or month not in month_set:
+            continue
+
+        payload = event["data"]
+        credit_id = payload.get("credit_account")
+        credit = s.get("credit_accounts", {}).get(credit_id, {})
+        card_id = payload.get("card")
+        card = credit.get("cards", {}).get(card_id, {})
+        currency = str(payload.get("currency", credit.get("currency", "SGD"))).upper()
+        series = currencies.setdefault(currency, new_series(currency))
+        selected = series["months"][month]
+        amount = Decimal(str(payload["amount"]))
+        field = "purchases" if kind == "credit_purchase" else "refunds"
+        selected[field] += amount
+
+        card_key = (credit_id or "", card_id or "")
+        card_detail = selected["by_card"].setdefault(card_key, {
+            "credit_account": credit_id, "credit_account_name": credit.get("name", credit_id),
+            "card": card_id, "card_name": card.get("name", card_id),
+            "purchases": Decimal(0), "refunds": Decimal(0), "net_spending": Decimal(0),
+            "transactions": []})
+        card_detail[field] += amount
+
+        transaction = {"id": event["id"], "kind": kind, "date": event["date"],
+                       "credit_account": credit_id, "credit_account_name": credit.get("name", credit_id),
+                       "card": card_id, "card_name": card.get("name", card_id),
+                       "amount": str(amount), "currency": currency}
+        if payload.get("description"):
+            transaction["description"] = payload["description"]
+        selected["transactions"].append(transaction)
+        card_detail["transactions"].append(transaction)
+
+    output = {}
+    for currency, series in sorted(currencies.items()):
+        totals = series["totals"]
+        months_out = []
+        for month in months:
+            selected = series["months"][month]
+            selected["net_spending"] = selected["purchases"] - selected["refunds"]
+            for field in totals:
+                totals[field] += selected[field]
+            selected["transactions"].sort(key=lambda row: (row["date"], row["id"]))
+            cards_out = []
+            for card_detail in selected["by_card"].values():
+                card_detail["net_spending"] = card_detail["purchases"] - card_detail["refunds"]
+                for field in ("purchases", "refunds", "net_spending"):
+                    card_detail[field] = str(card_detail[field])
+                card_detail["transactions"].sort(key=lambda row: (row["date"], row["id"]))
+                cards_out.append(card_detail)
+            cards_out.sort(key=lambda row: (str(row["credit_account_name"]).casefold(),
+                                            str(row["card_name"]).casefold(), row["card"] or ""))
+            selected["by_card"] = cards_out
+            for field in ("purchases", "refunds", "net_spending"):
+                selected[field] = str(selected[field])
+            months_out.append(selected)
+        series["totals"] = {field: str(value) for field, value in totals.items()}
+        series["months"] = months_out
+        output[currency] = series
+    return {"currencies": output}
 
 
 def dashboard(s, today, actor="web"):

@@ -9,6 +9,25 @@ from ..core import store
 from .handlers import code_entities, configure_command_menu, handle
 
 
+def send_reply(telegram_client, base, chat_id, pending, markup=None):
+    """Send a reply to its originating private chat, attaching its own keyboard."""
+    if not pending:
+        return
+    starts = list(range(0, len(pending), 3500))
+    for start in starts:
+        chunk = pending[start:start + 3500]
+        payload = {"chat_id": chat_id, "text": chunk, "entities": code_entities(chunk)}
+        if markup and start == starts[-1]:
+            payload["reply_markup"] = markup
+        sent = telegram_client.post(base + "sendMessage", json=payload)
+        sent.raise_for_status()
+
+
+def send_handler_reply(telegram_client, base, chat_id, text, user_state):
+    """Deliver a handler result with the keyboard saved alongside that result."""
+    send_reply(telegram_client, base, chat_id, text, user_state.get("pending_markup"))
+
+
 class BackendClient:
     """Typed-by-operation adapter for the bot's authenticated HTTP API."""
 
@@ -140,18 +159,6 @@ def main():
     base = "https://api.telegram.org/bot" + token + "/"
     commands_registered = False
 
-    def send_reply(chat_id, pending, markup=None):
-        if not pending:
-            return
-        starts = list(range(0, len(pending), 3500))
-        for start in starts:
-            chunk = pending[start:start + 3500]
-            payload = {"chat_id": chat_id, "text": chunk, "entities": code_entities(chunk)}
-            if markup and start == starts[-1]:
-                payload["reply_markup"] = markup
-            sent = telegram.post(base + "sendMessage", json=payload)
-            sent.raise_for_status()
-
     def actor_ids(update):
         message = update.get("message") or (update.get("callback_query") or {}).get("message") or {}
         sender = (update.get("message") or {}).get("from") or (update.get("callback_query") or {}).get("from") or {}
@@ -188,7 +195,7 @@ def main():
                         link_challenge = start_link_challenge(update["message"]["text"].strip())
                     if link_challenge is not None:
                         result = handle_link_start(update, link_challenge, backend.confirm_telegram_link)
-                        send_reply(chat_id, result)
+                        send_reply(telegram, base, chat_id, result)
                     else:
                         def load_state():
                             return backend.user_state(uid, chat_id, "get")
@@ -212,7 +219,8 @@ def main():
                                        "last_tvm": current.get("last_tvm")}
                         pending = current.get("pending_reply")
                         if pending:
-                            send_reply(chat_id, pending, current.get("pending_markup"))
+                            send_reply(telegram, base, chat_id, pending,
+                                       current.get("pending_markup"))
                             state_cache.update(pending_reply=None, pending_markup=None)
                             persist_state()
                         result = handle(update, uid,
@@ -225,18 +233,19 @@ def main():
                         if result:
                             # Handler writes a per-user pending reply before delivery so a
                             # failed Telegram send can be retried on that user's next update.
-                            send_reply(chat_id, result)
+                            send_handler_reply(telegram, base, chat_id, result, state_cache)
                             state_cache.update(pending_reply=None, pending_markup=None)
                             persist_state()
                 except httpx.HTTPStatusError as exc:
                     if exc.response.status_code == 403:
-                        send_reply(chat_id, "This Telegram account is not linked to a financial planner account. "
+                        send_reply(telegram, base, chat_id,
+                                   "This Telegram account is not linked to a financial planner account. "
                                    "Use the web app's Telegram linking option, then try again.")
                     elif exc.response.status_code == 422:
                         detail = exc.response.json().get("detail", "Invalid input")
                         message = detail.get("message") if isinstance(detail, dict) else str(detail)
                         result = "Request not completed: " + message + ". Use /cancel or try again."
-                        send_reply(chat_id, result)
+                        send_reply(telegram, base, chat_id, result)
                     else:
                         raise
                 runtime = store.read_bot_runtime()

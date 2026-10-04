@@ -156,6 +156,7 @@ def test_authentication_csrf_and_bot_scope(client):
     cashflow = client.get("/api/cashflow")
     assert cashflow.status_code == 200
     assert cashflow.json()["selection"]["type"] == "last_12_months"
+    assert cashflow.json()["credit_card_spending"]["currencies"] == {}
     year = client.get("/api/cashflow?year=2025")
     assert year.status_code == 200
     assert year.json()["selection"]["start_month"] == "2025-01"
@@ -345,16 +346,19 @@ def test_telegram_money_input_retries_and_transfer_collects_both_sides(client):
     retry = handle_bot_for_test(update(303, "EUR 100"), owner, lambda: {}, mutate)
     assert "using SGD or USD" in retry and "Please retry" in retry
     assert store.read()["bot"]["session"]["index"] == 2
-    assert "received" in handle_bot_for_test(update(304, "sgd 135"), owner, lambda: {}, mutate).lower()
-    retry = handle_bot_for_test(update(305, "USD"), owner, lambda: {}, mutate)
+    retry = handle_bot_for_test(update(304, "SGD1,2"), owner, lambda: {}, mutate)
     assert "Please retry" in retry
-    assert "YYYY-MM-DD" in handle_bot_for_test(update(306, "USD 100"), owner, lambda: {}, mutate)
-    assert "/confirm" in handle_bot_for_test(update(307, "today"), owner, lambda: {}, mutate)
-    handle_bot_for_test(update(308, "/confirm"), owner, lambda: {}, mutate)
+    assert store.read()["bot"]["session"]["index"] == 2
+    assert "received" in handle_bot_for_test(update(305, "sgd135"), owner, lambda: {}, mutate).lower()
+    retry = handle_bot_for_test(update(306, "USD"), owner, lambda: {}, mutate)
+    assert "Please retry" in retry
+    assert "YYYY-MM-DD" in handle_bot_for_test(update(307, "USD1,000.50"), owner, lambda: {}, mutate)
+    assert "/confirm" in handle_bot_for_test(update(308, "today"), owner, lambda: {}, mutate)
+    handle_bot_for_test(update(309, "/confirm"), owner, lambda: {}, mutate)
     payload = saved[-1][1]
     assert {key: payload[key] for key in ("account", "destination", "currency", "amount", "to_currency", "received")} == {
         "account": source, "destination": destination, "currency": "SGD", "amount": "135",
-        "to_currency": "USD", "received": "100"}
+        "to_currency": "USD", "received": "1000.50"}
 
 
 def test_telegram_date_button_and_validation_are_shared_across_transaction_types(client):
