@@ -97,20 +97,27 @@ const drilldown=vm.runInContext("cashflowTransactionButtons([{id:'older',date:'2
 assert(drilldown.indexOf('2026-09-01')<drilldown.indexOf('2026-08-01'),'newest cash-flow transaction appears first');
 fixture.as_of='2026-09-25';
 const usdFixture={currency:'USD',months:[{month:'2026-09',inflow:'4.25',outflow:'0',net:'4.25',internal_transfer_in:'0',internal_transfer_out:'0',by_kind:[],by_account:[]}]};
-const cardFixture={currency:'SGD',months:[{month:'2026-09',purchases:'45.00',refunds:'5.00',net_spending:'40.00',transactions:[{id:'tx-card',kind:'credit_purchase',date:'2026-09-12',credit_account_name:'Main card',card_name:'Visa',description:'Lunch',amount:'45.00'}]},{month:'2026-08',purchases:'0',refunds:'0',net_spending:'0',transactions:[]}]};
-context.cashflowPayload={as_of:'2026-09-25',selection:{type:'last_12_months',year:null,start_month:'2025-10',end_month:'2026-09',current_month_partial:true},currencies:{SGD:cashflowFixture,USD:usdFixture},credit_card_spending:{currencies:{SGD:cardFixture}}};
+const activityFixture={currency:'SGD',months:[{month:'2026-09',deposits:'1200.00',card_refunds:'5.00',withdrawals:'350.00',card_purchases:'45.00',inflow:'1205.00',outflow:'395.00',net_recorded_movement:'810.00',transactions:[{id:'tx-card',kind:'credit_purchase',category:'card_purchases',direction:'outflow',date:'2026-09-12',credit_account_name:'Main card',card_name:'Visa',description:'Lunch',amount:'45.00'},{id:'tx-deposit',kind:'deposit',category:'deposits',direction:'inflow',date:'2026-09-10',account_name:'Everyday account',description:'Salary',amount:'1200.00'}]},{month:'2026-08',deposits:'0',card_refunds:'0',withdrawals:'0',card_purchases:'0',inflow:'0',outflow:'0',net_recorded_movement:'0',transactions:[]}]};
+context.cashflowPayload={as_of:'2026-09-25',selection:{type:'last_12_months',year:null,start_month:'2025-10',end_month:'2026-09',current_month_partial:true},currencies:{SGD:cashflowFixture,USD:usdFixture},spending_by_transaction_date:{currencies:{SGD:activityFixture}}};
 const cashflowHost={innerHTML:''};
 const cardCashflowHost={innerHTML:''};
-context.document={querySelector(selector){return selector==='#bank-cashflow-content'?cashflowHost:selector==='#credit-card-spending-content'?cardCashflowHost:null;}};
+const filterHost={innerHTML:''};
+context.document={querySelector(selector){return selector==='#bank-cashflow-content'?cashflowHost:selector==='#spending-by-transaction-date-content'?cardCashflowHost:selector==='#cashflow-filter-content'?filterHost:null;}};
 vm.runInContext("bankCashflow=cashflowPayload;bankCashflowYear='last12';bankCashflowMonth='2026-09';renderBankCashflow()",context);
 assert(cashflowHost.innerHTML.includes('Monthly overview · SGD'));
 assert(cashflowHost.innerHTML.includes('Monthly overview · USD'));
 assert(cashflowHost.innerHTML.includes('USD 4.25'));
-assert(cardCashflowHost.innerHTML.includes('SGD 40.00'));
+assert(cardCashflowHost.innerHTML.includes('SGD 810.00'));
+assert(cardCashflowHost.innerHTML.includes('SGD 1,200.00'));
+assert(cardCashflowHost.innerHTML.includes('Inflow · Deposit'));
+assert(cardCashflowHost.innerHTML.includes('Outflow · Card purchase'));
 assert(cardCashflowHost.innerHTML.includes('Main card'));
 assert(cardCashflowHost.innerHTML.includes('Lunch'));
 assert(cardCashflowHost.innerHTML.includes('data-action="cashflow-event" data-id="tx-card"'));
-assert.deepEqual(Array.from(vm.runInContext("cashflowAvailableMonths({as_of:'2026-09-25',currencies:{},credit_card_spending:{currencies:{SGD:cashflowTestData}}})",context)),['2026-08','2026-09'],'card activity supplies month options when the bank has no activity');
+assert(filterHost.innerHTML.includes('Month to view'));
+assert.deepEqual(Array.from(vm.runInContext("cashflowAvailableMonths({as_of:'2026-09-25',currencies:{},spending_by_transaction_date:{currencies:{SGD:cashflowTestData}}})",context)),['2026-08','2026-09'],'dated spending supplies month options when the bank has no activity');
+assert(vm.runInContext('bankCashflowPage()',context).includes('Spending by transaction date'));
+assert(!vm.runInContext('bankCashflowPage()',context).includes('Credit card spending'));
 
 class FormValues{constructor(form){return Object.entries(form.submitted)[Symbol.iterator]();}}
 context.FormData=FormValues;

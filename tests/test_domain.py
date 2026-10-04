@@ -366,6 +366,7 @@ def test_monthly_cashflow_uses_active_cash_events_and_native_currency_series():
     event("old", "deposit", "2026-01-29", {"account": "sgd", "currency": "SGD", "amount": "100"}, "superseded", replaces="x")
     event("x", "deposit", "2026-01-29", {"account": "sgd", "currency": "SGD", "amount": "100"}, "superseded", replaces="new")
     event("new", "deposit", "2026-02-02", {"account": "sgd", "currency": "SGD", "amount": "100.10"})
+    event("cash-out", "withdraw", "2026-02-04", {"account": "sgd", "currency": "SGD", "amount": "10"})
     event("broker-deposit", "deposit", "2026-02-02", {"account": "broker", "currency": "USD", "amount": "900"})
     event("cpf-withdraw", "withdraw", "2026-02-02", {"account": "cpf", "currency": "SGD", "amount": "30"})
     event("void", "withdraw", "2026-02-03", {"account": "sgd", "currency": "SGD", "amount": "70"}, "void")
@@ -388,7 +389,7 @@ def test_monthly_cashflow_uses_active_cash_events_and_native_currency_series():
                                    "end_month": "2026-12", "current_month_partial": True}
     sgd = result["currencies"]["SGD"]
     feb = next(row for row in sgd["months"] if row["month"] == "2026-02")
-    assert feb["inflow"] == "121.10" and feb["outflow"] == "16" and feb["net"] == "105.10"
+    assert feb["inflow"] == "121.10" and feb["outflow"] == "26" and feb["net"] == "95.10"
     assert feb["internal_transfer_in"] == "0" and feb["internal_transfer_out"] == "30"
     deposit = next(kind for kind in feb["by_kind"] if kind["kind"] == "deposit")
     assert deposit["transactions"][0]["id"] == "new"
@@ -398,19 +399,25 @@ def test_monthly_cashflow_uses_active_cash_events_and_native_currency_series():
     assert {kind["kind"] for kind in feb["by_kind"]}.isdisjoint({"credit_purchase", "credit_refund"})
     march = next(row for row in sgd["months"] if row["month"] == "2026-03")
     assert march["outflow"] == "20"
-    card_sgd = result["credit_card_spending"]["currencies"]["SGD"]
-    card_feb = next(row for row in card_sgd["months"] if row["month"] == "2026-02")
-    assert card_feb["purchases"] == "50" and card_feb["refunds"] == "8"
-    assert card_feb["net_spending"] == "42"
-    assert [row["id"] for row in card_feb["transactions"]] == ["buy-card", "refund"]
-    assert card_feb["transactions"][0]["credit_account_name"] == "Main Card"
-    assert card_feb["transactions"][0]["card_name"] == "Visa"
-    assert all(row["id"] != "pay" for row in card_sgd["months"][1]["transactions"])
-    card_march = next(row for row in card_sgd["months"] if row["month"] == "2026-03")
-    assert card_march["net_spending"] == "0" and card_march["transactions"] == []
+    dated = result["spending_by_transaction_date"]["currencies"]["SGD"]
+    dated_feb = next(row for row in dated["months"] if row["month"] == "2026-02")
+    assert dated_feb["inflow"] == "108.10" and dated_feb["outflow"] == "60"
+    assert dated_feb["net_recorded_movement"] == "48.10"
+    assert [row["id"] for row in dated_feb["transactions"]] == ["new", "cash-out", "buy-card", "refund"]
+    assert dated_feb["transactions"][0]["account_name"] == "SGD Bank"
+    assert dated_feb["transactions"][1]["direction"] == "outflow"
+    assert dated_feb["transactions"][2]["credit_account_name"] == "Main Card"
+    assert dated_feb["transactions"][2]["card_name"] == "Visa"
+    assert dated_feb["transactions"][2]["direction"] == "outflow"
+    assert dated_feb["transactions"][3]["direction"] == "inflow"
+    dated_march = next(row for row in dated["months"] if row["month"] == "2026-03")
+    assert dated_march["inflow"] == "0" and dated_march["outflow"] == "0"
+    assert dated_march["transactions"] == []
     assert "USD" in result["currencies"]
     assert result["currencies"]["USD"]["totals"]["inflow"] == "4.25"
     usd_feb = next(row for row in result["currencies"]["USD"]["months"] if row["month"] == "2026-02")
+    dated_usd = result["spending_by_transaction_date"]["currencies"]["USD"]
+    assert next(row for row in dated_usd["months"] if row["month"] == "2026-02")["inflow"] == "4.25"
     assert usd_feb["internal_transfer_in"] == "22"
     contributing_ids = {transaction["id"] for row in feb["by_kind"] for transaction in row["transactions"]}
     assert "bank-to-broker" in contributing_ids

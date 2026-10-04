@@ -157,6 +157,7 @@ def test_authentication_csrf_and_bot_scope(client):
     assert cashflow.status_code == 200
     assert cashflow.json()["selection"]["type"] == "last_12_months"
     assert cashflow.json()["credit_card_spending"]["currencies"] == {}
+    assert cashflow.json()["spending_by_transaction_date"]["currencies"] == {}
     year = client.get("/api/cashflow?year=2025")
     assert year.status_code == 200
     assert year.json()["selection"]["start_month"] == "2025-01"

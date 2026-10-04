@@ -138,6 +138,9 @@
   gap:10px;
   margin-top:12px
 }
+.cashflow-totals--detailed{
+  grid-template-columns:repeat(auto-fit,minmax(135px,1fr))
+}
 .cashflow-totals>div{
   display:grid;
   gap:5px;
