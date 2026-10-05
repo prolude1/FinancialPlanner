@@ -10,6 +10,11 @@ x-backend: &backend
     WEB_ORIGIN: http://localhost:${WEB_PORT:-8080}
   restart: unless-stopped
   init: true
+  read_only: true
+  cap_drop:
+    - ALL
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,size=128m
   security_opt:
     - no-new-privileges:true
 
@@ -28,6 +33,8 @@ services:
       timeout: 3s
       retries: 20
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
   migrate:
     <<: *backend
     command: [python, -m, app.core.store]
@@ -117,6 +124,12 @@ services:
       api:
         condition: service_healthy
     restart: unless-stopped
+    read_only: true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=32m,uid=101,gid=101,mode=1777
+      - /etc/nginx/conf.d:rw,noexec,nosuid,size=1m,uid=101,gid=101,mode=0755
     security_opt:
       - no-new-privileges:true
     healthcheck:
