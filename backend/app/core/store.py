@@ -119,6 +119,7 @@ def lock_application(c):
 
 def normalized(data):
     data.setdefault("credit_accounts", {})
+    data.setdefault("recurring_schedules", [])
     return data
 
 
@@ -201,6 +202,7 @@ def patch_telegram_user_state(principal, telegram_user_id, patch):
 def _new_tenant_data(data=None):
     value = deepcopy(data) if data is not None else empty()
     value.pop("bot", None)
+    value.setdefault("recurring_schedules", [])
     return normalized(value)
 
 

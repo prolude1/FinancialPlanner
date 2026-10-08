@@ -1,17 +1,27 @@
-FROM python:3.12-slim AS dependencies
+ARG PYTHON_BASE=python:3.12-slim-trixie@sha256:02108f5d322dd89f1c9e552442c25acb0543dfdbc455693a5599624f20d9155d
+
+FROM ${PYTHON_BASE} AS dependencies
 
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1
 WORKDIR /build
 
+RUN apt-get update \
+    && apt-get upgrade --yes \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY backend/requirements.txt ./requirements.txt
 RUN pip wheel --no-cache-dir --wheel-dir=/wheels -r requirements.txt
 
-FROM python:3.12-slim AS runtime
+FROM ${PYTHON_BASE} AS runtime
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 WORKDIR /app
+
+RUN apt-get update \
+    && apt-get upgrade --yes \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY --from=dependencies /wheels /wheels
 COPY backend/requirements.txt ./requirements.txt

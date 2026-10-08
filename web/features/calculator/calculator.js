@@ -6,6 +6,10 @@ let calculatorStreams=[
   {name:'Savings',initial_value:'10000',cashflow:'300',cashflow_frequency:'monthly',cashflow_timing:'end',annual_rate:'2.5',compounding_frequency:'monthly',cashflow_start_years:'0',cashflow_start_remainder_months:'0',cashflow_end_mode:'plan',cashflow_end_years:'',cashflow_end_remainder_months:''},
   {name:'Investments',initial_value:'10000',cashflow:'500',cashflow_frequency:'monthly',cashflow_timing:'end',annual_rate:'7',compounding_frequency:'monthly',cashflow_start_years:'0',cashflow_start_remainder_months:'0',cashflow_end_mode:'plan',cashflow_end_years:'',cashflow_end_remainder_months:''}
 ];
+const calculatorFrequencies=['monthly','quarterly','semiannual','annual'];
+function calculatorFrequencyOptions(selected){
+  return calculatorFrequencies.map(value=>`<option value="${value}" ${selected===value?'selected':''}>${value.charAt(0).toUpperCase()+value.slice(1)}</option>`).join('');
+}
 function calculatorPlanSwitch(){return `<div class="calculator-plan-switch"><button type="button" data-action="calculator-plan" data-value="single" class="${calculatorPlanMode==='single'?'active':''}">Single cash flow</button><button type="button" data-action="calculator-plan" data-value="multiple" class="${calculatorPlanMode==='multiple'?'active':''}">Multiple cash flows</button></div>`;}
 function contributionWindowModel(values={}){
   const start=Number(values.cashflow_start_years||0)*12+Number(values.cashflow_start_remainder_months||0);
@@ -26,9 +30,9 @@ function streamFields(stream,index,pv){
     <label class="full">Name<input name="name" value="${esc(stream.name)}" maxlength="80" required></label>
     <label class="full stream-initial-label">${pv?'Target value':'Initial amount'} (SGD)<input name="initial_value" type="number" min="0" step="0.01" value="${esc(stream.initial_value)}" required></label>
     <label>Recurring cash flow (SGD)<input name="cashflow" type="number" step="0.01" value="${esc(stream.cashflow)}" required><small>Use a negative number for withdrawals.</small></label>
-    <label>Cash-flow frequency<select name="cashflow_frequency">${frequencyOptions(stream.cashflow_frequency)}</select></label>
+    <label>Cash-flow frequency<select name="cashflow_frequency">${calculatorFrequencyOptions(stream.cashflow_frequency)}</select></label>
     <label>Expected annual return (%)<input name="annual_rate" type="number" step="0.01" value="${esc(stream.annual_rate)}" required></label>
-    <label>Compounding frequency<select name="compounding_frequency">${frequencyOptions(stream.compounding_frequency)}</select></label>
+    <label>Compounding frequency<select name="compounding_frequency">${calculatorFrequencyOptions(stream.compounding_frequency)}</select></label>
     <label class="full">Cash-flow timing<select name="cashflow_timing"><option value="end" ${stream.cashflow_timing==='end'?'selected':''}>End of each period</option><option value="beginning" ${stream.cashflow_timing==='beginning'?'selected':''}>Beginning of each period</option></select></label>
     ${contributionWindowFields(stream)}
   </div></section>`;
@@ -50,9 +54,9 @@ function calculatorPage(){
     <div class="form-grid">
       <label class="full" id="calculator-initial-label">${pv?'Desired future amount':'Initial amount'} (SGD)<input name="initial_value" type="number" step="0.01" min="0" value="${esc(calculatorInput.initial_value)}" required></label>
       <label>Recurring cash flow (SGD)<input name="cashflow" type="number" step="0.01" value="${esc(calculatorInput.cashflow)}" required><small>Use a negative number for withdrawals.</small></label>
-      <label>Cash-flow frequency<select name="cashflow_frequency">${frequencyOptions(calculatorInput.cashflow_frequency)}</select></label>
+      <label>Cash-flow frequency<select name="cashflow_frequency">${calculatorFrequencyOptions(calculatorInput.cashflow_frequency)}</select></label>
       <label>Expected annual return (%)<input name="annual_rate" type="number" step="0.01" value="${esc(calculatorInput.annual_rate)}" required></label>
-      <label>Compounding frequency<select name="compounding_frequency">${frequencyOptions(calculatorInput.compounding_frequency)}</select></label>
+      <label>Compounding frequency<select name="compounding_frequency">${calculatorFrequencyOptions(calculatorInput.compounding_frequency)}</select></label>
       <label>Years<input name="duration_years" type="number" min="0" step="1" value="${esc(calculatorInput.duration_years)}" required></label>
       <label>Additional months<input name="duration_months" type="number" min="0" max="11" step="1" value="${esc(calculatorInput.duration_months)}" required></label>
       <label class="full">Cash-flow timing<select name="cashflow_timing"><option value="end" ${calculatorInput.cashflow_timing==='end'?'selected':''}>End of each period</option><option value="beginning" ${calculatorInput.cashflow_timing==='beginning'?'selected':''}>Beginning of each period</option></select></label>

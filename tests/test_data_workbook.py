@@ -82,6 +82,18 @@ def test_template_is_synthetic_and_import_preview_warns(isolated_db):
     assert any("replaces current records" in warning for warning in preview["warnings"])
 
 
+def test_legacy_workbook_without_recurring_schedules_remains_importable():
+    from app.core.domain import empty
+    state = empty()
+    state.pop("recurring_schedules")
+    content, _ = workbook._build_xlsx({
+        "planner_state": [{"id": 1, "schema_version": 1, "data": state}],
+        "instrument_catalog": [], "portfolio_history": [], "stock_cache": [],
+    })
+    parsed = workbook.read_workbook(content)
+    assert parsed["tables"]["planner_state"]["data"]["recurring_schedules"] == []
+
+
 def test_tampering_formulas_and_external_relationships_are_rejected(isolated_db):
     seed_tables()
     content, _ = workbook.snapshot_bytes()

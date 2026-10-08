@@ -1,0 +1,8 @@
+.recurring-schedule-list{display:grid;gap:0}
+.recurring-schedule-row{display:flex;align-items:center;justify-content:space-between;gap:1.25rem;padding:1rem 0;border-bottom:1px solid var(--line,#e8ece8)}
+.recurring-schedule-row:last-child{border-bottom:0}
+.recurring-schedule-main{display:grid;gap:.25rem;min-width:0}
+.recurring-schedule-main small,.recurring-schedule-frequency{color:var(--muted,#66736d);font-size:.85rem}
+.recurring-schedule-amount{white-space:nowrap;font-variant-numeric:tabular-nums}
+.recurring-schedule-status{text-transform:capitalize}
+@media(max-width:520px){.recurring-schedule-row{align-items:flex-start;flex-direction:column;gap:.5rem}}

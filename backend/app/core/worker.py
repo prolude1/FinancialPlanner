@@ -9,6 +9,7 @@ import httpx
 from . import store
 from .domain import replay, active_events, instrument, decimal
 from .providers import StockPriceProviderFactory, completed_session
+from .recurring import post_due as post_due_recurring
 
 
 stock_price_provider = StockPriceProviderFactory.create(
@@ -54,6 +55,28 @@ class LedgerBatchRefresher:
 
 
 ledger_batch_refresher = LedgerBatchRefresher()
+
+
+class RecurringTransactionWorker:
+    """Post tenant schedules atomically; failed tenants retry on a later poll."""
+
+    def __init__(self, repository=store, logger=logging):
+        self._repository = repository
+        self._logger = logger
+
+    def run(self, now=None):
+        today = (now or datetime.now(ZoneInfo(os.environ.get("APP_TIMEZONE", "Asia/Singapore")))).date()
+        total = 0
+        for principal in self._repository.tenant_principals():
+            try:
+                with self._repository.tenant_transaction(principal) as state:
+                    total += post_due_recurring(state, today)
+            except Exception:
+                self._logger.warning("Recurring ledger posting failed; retrying next cycle")
+        return total
+
+
+recurring_transaction_worker = RecurringTransactionWorker()
 
 
 def provider_symbol(exchange, symbol):
@@ -295,6 +318,7 @@ def main():
             refresh_all_ledgers()
         except Exception:
             logging.warning("Market refresh failed; retrying on next cycle")
+        recurring_transaction_worker.run()
         last_history_refresh = run_due(last_history_refresh,
             int(os.environ.get("HISTORY_REFRESH_SECONDS", "21600")),
             refresh_all_portfolio_history, "Brokerage history refresh")

@@ -106,7 +106,7 @@ def next_due(d, anchor_day):
 
 def empty():
     return {"accounts": {}, "credit_accounts": {}, "events": [], "loans": {}, "prices": {}, "fx": {},
-            "revision": 0, "receipts": {}, "bot": {"offset": 0, "session": None},
+            "revision": 0, "receipts": {}, "recurring_schedules": [], "bot": {"offset": 0, "session": None},
             "provider_status": {}}
 
 

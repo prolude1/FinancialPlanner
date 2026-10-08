@@ -34,6 +34,12 @@ FIELDS = {
     "credit_purchase": [("card", "Which card was used?"), ("description", "Purchase description?"), ("amount", "Purchase amount in SGD?"), ("date", "Purchase date (YYYY-MM-DD or today)?")],
     "credit_refund": [("credit_account", "Credit-card account ID?"), ("card", "Card ID?"), ("description", "Refund description?"), ("amount", "Refund amount in SGD?"), ("date", "Refund date (YYYY-MM-DD or today)?")],
     "credit_payment": [("credit_account", "Credit-card account ID?"), ("funding_account", "Account ID funding the payment?"), ("amount", "Payment amount in SGD?"), ("date", "Payment date (YYYY-MM-DD or today)?")],
+    "recurring": [("account", "Bank account to deduct from?"),
+                  ("cadence", "How often: monthly or annual?"),
+                  ("money", "Amount in the account currency (e.g. SGD 100 or USD 25.50)?"),
+                  ("description", "Description for each transaction?"),
+                  ("day_of_month", "Due day?"),
+                  ("month_of_year", "Month of the year (1–12)?")],
 }
 TRADE = [("account", "Brokerage account ID?"), ("exchange", "Exchange: NYSE, NASDAQ, LSE or SGX? You can also enter EXCHANGE:TICKER, e.g. NASDAQ:AAPL."),
          ("symbol", "Trading symbol, e.g. AAPL or VWRA?"), ("asset_class", "Asset class: equity or etf?"),
@@ -53,6 +59,7 @@ TOP_LEVEL_COMMANDS = (
     ("buy", "Buy shares or ETFs"),
     ("sell", "Sell shares or ETFs"),
     ("transfer", "Move money between accounts"),
+    ("recurring", "Schedule a recurring bank deduction"),
     ("cpf_set", "Reconcile a CPF statement balance"),
     ("account", "Account actions and balances"),
     ("creditcard", "Credit-card actions and balances"),
@@ -150,6 +157,8 @@ def eligible_accounts(session, state):
         accounts = [a for a in accounts if a["type"] == "brokerage"]
     if field == "account" and session["command"] == "cpf_set":
         accounts = [a for a in accounts if a["type"] == "cpf"]
+    if field == "account" and session["command"] == "recurring":
+        accounts = [a for a in accounts if a["type"] == "bank"]
     if field == "destination" and session["data"].get("account"):
         accounts = [a for a in accounts if a["id"] != session["data"]["account"]]
     if field == "funding_account":
@@ -206,6 +215,9 @@ def session_keyboard(session, state):
     field = FIELDS[session["command"]][session["index"]][0]
     if field == "date":
         return date_keyboard(session)
+    if field == "cadence" and session["command"] == "recurring":
+        return {"inline_keyboard": [[{"text": "Monthly", "callback_data": "value:monthly"}],
+                                     [{"text": "Annual", "callback_data": "value:annual"}]]}
     if field in ("account", "destination", "funding_account"):
         rows = [[{"text": account["name"], "callback_data": "value:" + account["id"]}]
                 for account in eligible_accounts(session, state)]
@@ -247,6 +259,13 @@ def prompt(session, state):
     field, question = FIELDS[session["command"]][session["index"]]
     if field == "date":
         return "Date (YYYY-MM-DD). You can also type today or tap Today."
+    if field == "money" and session["command"] == "recurring":
+        account = state["accounts"].get(session["data"].get("account"), {})
+        currency = account.get("currency", "SGD")
+        return f"Amount in {currency} (enter currency and amount together, e.g. {currency} 100)."
+    if field == "day_of_month" and session["command"] == "recurring":
+        cadence = session["data"].get("cadence")
+        return "Monthly due day (1–28)?" if cadence == "monthly" else "Annual due day (1–31, valid for the selected month every year)?"
     if field == "credit_account":
         items = sorted(state.get("credit_accounts", {}).values(), key=lambda a: a["name"].casefold())
         if not items:
@@ -278,6 +297,8 @@ def prompt(session, state):
         accounts = [a for a in accounts if a["type"] == "brokerage"]
     if field == "account" and session["command"] == "cpf_set":
         accounts = [a for a in accounts if a["type"] == "cpf"]
+    if field == "account" and session["command"] == "recurring":
+        accounts = [a for a in accounts if a["type"] == "bank"]
     if field == "destination" and session["data"].get("account"):
         accounts = [a for a in accounts if a["id"] != session["data"]["account"]]
     if field == "funding_account":
@@ -350,7 +371,7 @@ def handle_link_start(update, challenge, confirm_link):
 
 
 def handle(update, actor_id, query, mutate, load_state, save_state,
-           calculate=None, confirm_link=None):
+           calculate=None, confirm_link=None, create_recurring=None):
     text = update.get("message", {}).get("text", "").strip()
     link_challenge = start_link_challenge(text)
     if link_challenge is not None:
@@ -465,9 +486,25 @@ def handle(update, actor_id, query, mutate, load_state, save_state,
                 result = "No completed operation to confirm."
             else:
                 payload = dict(session["data"])
-                saved = mutate(session["command"], payload, "telegram-" + str(uid))
-                result = "Saved. Reference: " + str(saved.get("id", "ok")) + ". The dashboard will refresh automatically."
-                session = None
+                if session["command"] == "recurring":
+                    if create_recurring is None:
+                        result = "Recurring deductions are unavailable until the schedule service is ready. Nothing was saved."
+                        save_state(session=session, pending_reply=result,
+                                   pending_markup=session_keyboard(session, state))
+                        return result
+                    payload = {key: payload[key] for key in
+                               ("account", "amount", "description", "cadence",
+                                "day_of_month", "month_of_year")}
+                    saved = create_recurring(payload, "telegram-" + str(update["update_id"]))
+                    schedule = saved.get("schedule", saved)
+                    result = (f"Recurring deduction saved. Reference: {schedule.get('id', 'ok')}.\n"
+                              f"Next due: {schedule.get('next_due_date', 'pending')}. "
+                              "The planner records each transaction on its due date; it does not send bank payments.")
+                    session = None
+                else:
+                    saved = mutate(session["command"], payload, "telegram-" + str(uid))
+                    result = "Saved. Reference: " + str(saved.get("id", "ok")) + ". The dashboard will refresh automatically."
+                    session = None
         elif command in FIELDS:
             session = {"command": command, "data": {}, "index": 0, "started": time.time(),
                        "nonce": secrets.token_hex(4)}
@@ -495,6 +532,12 @@ def handle(update, actor_id, query, mutate, load_state, save_state,
             text = account_types.get(text.strip().lower(), text.strip().lower())
         if session["command"] == "account_add" and field in ("currency", "cpf_type"):
             text = text.strip().upper()
+        if session["command"] == "recurring" and field == "cadence":
+            text = text.strip().lower()
+            if text not in ("monthly", "annual"):
+                result = "Choose monthly or annual, then retry.\n" + prompt(session, state)
+                save_state(session=session, pending_reply=result, pending_markup=session_keyboard(session, state))
+                return result
         if session["command"] == "account_add" and field == "currency" and text not in ("SGD", "USD"):
             result = "Only SGD and USD are supported. Enter SGD or USD, then retry.\n" + prompt(session, state)
             save_state(session=session, pending_reply=result, pending_markup=session_keyboard(session, state))
@@ -547,6 +590,20 @@ def handle(update, actor_id, query, mutate, load_state, save_state,
                 session["data"]["to_currency"] = currency_code.upper()
                 session["data"]["received"] = amount
             money_shortcut = True
+            if session["command"] == "recurring":
+                account = state["accounts"].get(session["data"].get("account"), {})
+                expected_currency = str(account.get("currency", "SGD")).upper()
+                if currency_code.upper() != expected_currency:
+                    result = (f"This account uses {expected_currency}. Enter the amount in {expected_currency} and retry.\n"
+                              + prompt(session, state))
+                    save_state(session=session, pending_reply=result,
+                               pending_markup=session_keyboard(session, state))
+                    return result
+                if Decimal(amount) <= 0:
+                    result = "Enter an amount greater than zero, then retry.\n" + prompt(session, state)
+                    save_state(session=session, pending_reply=result,
+                               pending_markup=session_keyboard(session, state))
+                    return result
         card_shortcut = False
         if session["command"] == "credit_purchase" and field == "card":
             parts = text.split(":", 1)
@@ -581,6 +638,43 @@ def handle(update, actor_id, query, mutate, load_state, save_state,
             if notes:
                 instrument_note = "\n".join(notes) + "\n"
         session["index"] += 1
+        if session["command"] == "recurring":
+            cadence = session["data"].get("cadence")
+            if (session["index"] < len(FIELDS["recurring"])
+                    and FIELDS["recurring"][session["index"]][0] == "month_of_year"
+                    and cadence == "monthly"):
+                session["data"]["month_of_year"] = None
+                session["index"] += 1
+            if field == "day_of_month":
+                max_day = 28 if session["data"].get("cadence") == "monthly" else 31
+                if not re.fullmatch(r"(?:[1-9]|[12]\d|3[01])", text.strip()) or int(text) > max_day:
+                    session["index"] -= 1
+                    session["data"].pop("day_of_month", None)
+                    result = f"Enter a day from 1 to {max_day}, then retry.\n" + prompt(session, state)
+                    save_state(session=session, pending_reply=result,
+                               pending_markup=session_keyboard(session, state))
+                    return result
+                session["data"]["day_of_month"] = int(text)
+            if field == "month_of_year":
+                if not re.fullmatch(r"(?:[1-9]|1[0-2])", text.strip()):
+                    session["index"] -= 1
+                    session["data"].pop("month_of_year", None)
+                    result = "Enter a month from 1 to 12, then retry.\n" + prompt(session, state)
+                    save_state(session=session, pending_reply=result,
+                               pending_markup=session_keyboard(session, state))
+                    return result
+                month, day_of_month = int(text), int(session["data"]["day_of_month"])
+                # Annual dates must exist every year; reject Feb 29 and all other
+                # dates that would need leap-year or month-end clamping.
+                try:
+                    date(2001, month, day_of_month)
+                except ValueError:
+                    session["index"] -= 1
+                    session["data"].pop("month_of_year", None)
+                    result = "That annual date is not valid every year. Enter a month/day that exists each year, then retry.\n" + prompt(session, state)
+                    save_state(session=session, pending_reply=result,
+                               pending_markup=session_keyboard(session, state))
+                    return result
         # CPF subtype is meaningful only for CPF accounts. Bank and brokerage
         # setup proceeds directly to confirmation after the currency prompt.
         if (session["command"] == "account_add"

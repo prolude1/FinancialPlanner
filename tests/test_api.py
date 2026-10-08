@@ -569,13 +569,13 @@ def test_telegram_command_menu_keeps_top_level_choices_compact(client):
     commands = bot.telegram_commands()
     names = {item["command"] for item in commands}
     assert {"start", "help", "account", "creditcard", "deposit", "withdraw",
-            "transfer", "cpf_set", "purchase", "payment", "buy", "sell", "opening_holding",
+            "transfer", "recurring", "cpf_set", "purchase", "payment", "buy", "sell", "opening_holding",
             "split", "cancel", "calculator"} == names
     assert "stock" not in names
     assert not ({"account_add", "credit_purchase", "confirm"} & names)
     assert not ({"history", "correct", "void"} & names)
     assert len(names) == len(commands)
-    expected_order = ["deposit", "withdraw", "purchase", "payment", "buy", "sell", "transfer",
+    expected_order = ["deposit", "withdraw", "purchase", "payment", "buy", "sell", "transfer", "recurring",
                       "cpf_set", "account", "creditcard", "calculator", "opening_holding", "split",
                       "help", "start", "cancel"]
     assert [item["command"] for item in commands] == expected_order
@@ -599,6 +599,49 @@ def test_telegram_command_menu_keeps_top_level_choices_compact(client):
         listing = reply.split("Available commands:\n", 1)[1].split("\nView ", 1)[0]
         listed = [part.strip()[1:] for line in listing.splitlines() for part in line.split(" · ")]
         assert listed == expected_order
+
+
+def test_telegram_recurring_schedule_create_contract_and_idempotency(client, monkeypatch):
+    principal, telegram_id = "recurring-owner", 543210
+    bot_secret = "test-recurring-bot-secret-long-enough-123456"
+    monkeypatch.setattr(api, "BOT_SECRET", bot_secret)
+    with store.engine.begin() as connection:
+        connection.execute(store.telegram_connections.insert().values(
+            principal=principal, telegram_user_id=telegram_id, linked_at=int(time.time())))
+    with store.tenant_transaction(principal) as ledger:
+        ledger["accounts"]["BANK000001"] = {
+            "id": "BANK000001", "name": "Main bank", "type": "bank",
+            "currency": "SGD", "cpf_type": "", "archived": False,
+        }
+
+    request = {"telegram_user_id": telegram_id, "telegram_chat_id": telegram_id,
+               "schedule": {"account": "BANK000001", "amount": "25.50",
+                            "description": "Phone plan", "cadence": "monthly",
+                            "day_of_month": 15, "month_of_year": None}}
+    headers = {"Authorization": "Bearer " + bot_secret, "Idempotency-Key": "telegram-99001"}
+    created = client.post("/internal/bot/financial/recurring-transactions",
+                          json=request, headers=headers)
+    assert created.status_code == 201
+    assert created.headers["cache-control"] == "no-store"
+    schedule = created.json()["schedule"]
+    assert {key: schedule[key] for key in (
+        "account", "account_name", "amount", "currency", "description", "cadence",
+        "day_of_month", "month_of_year", "status", "last_posted_date", "posted_count"
+    )} == {
+        "account": "BANK000001", "account_name": "Main bank", "amount": "25.50",
+        "currency": "SGD", "description": "Phone plan", "cadence": "monthly",
+        "day_of_month": 15, "month_of_year": None, "status": "active",
+        "last_posted_date": None, "posted_count": 0,
+    }
+    repeated = client.post("/internal/bot/financial/recurring-transactions",
+                           json=request, headers=headers)
+    assert repeated.status_code == 201
+    assert repeated.json()["schedule"] == schedule
+
+    changed = {**request, "schedule": {**request["schedule"], "amount": "26.00"}}
+    conflict = client.post("/internal/bot/financial/recurring-transactions",
+                           json=changed, headers=headers)
+    assert conflict.status_code == 422
 
 
 def test_retired_telegram_history_and_edit_commands_redirect_without_mutation(client):
@@ -929,3 +972,60 @@ def test_stock_query_validation_and_provider_errors(client, monkeypatch):
     assert response.status_code == 503
     assert response.json()["detail"] == {"code": "provider_unavailable", "message": "offline",
                                           "retryable": True, "stale_available": False}
+
+
+def test_recurring_schedule_api_is_tenant_and_link_scoped(client, monkeypatch):
+    def principal(request):
+        token = request.headers.get("Authorization")
+        if token == "Bearer owner-a":
+            return "owner-a"
+        if token == "Bearer owner-b":
+            return "owner-b"
+        raise api.HTTPException(401, "Sign in with Keycloak")
+    monkeypatch.setattr(api, "keycloak_principal", principal)
+    with store.tenant_transaction("owner-a") as state:
+        state["accounts"]["bank-a"] = {"id": "bank-a", "name": "Salary", "type": "bank",
+            "currency": "USD", "archived": False}
+    body = {"account": "bank-a", "amount": "20.00", "description": "Monthly saving",
+        "cadence": "monthly", "day_of_month": 15, "month_of_year": None}
+    assert client.get("/api/recurring-transactions").status_code == 401
+    headers_a = {"Authorization": "Bearer owner-a", "Idempotency-Key": "web-schedule-1"}
+    created = client.post("/api/recurring-transactions", json=body, headers=headers_a)
+    assert created.status_code == 201
+    schedule = created.json()["schedule"]
+    assert schedule["currency"] == "USD" and schedule["account_name"] == "Salary"
+    assert schedule["cadence"] == "monthly" and schedule["status"] == "active"
+    retry = client.post("/api/recurring-transactions", json=body, headers=headers_a)
+    assert retry.status_code == 201 and retry.json()["schedule"]["id"] == schedule["id"]
+    assert len(client.get("/api/recurring-transactions", headers=headers_a).json()["schedules"]) == 1
+
+    headers_b = {"Authorization": "Bearer owner-b"}
+    assert client.get("/api/recurring-transactions", headers=headers_b).json()["schedules"] == []
+    assert client.patch(f"/api/recurring-transactions/{schedule['id']}", headers=headers_b,
+                        json={"amount": "99.00"}).status_code == 404
+    edited = client.patch(f"/api/recurring-transactions/{schedule['id']}", headers=headers_a,
+                          json={"amount": "25.00"})
+    assert edited.status_code == 200 and edited.json()["schedule"]["amount"] == "25.00"
+    paused = client.patch(f"/api/recurring-transactions/{schedule['id']}", headers=headers_a,
+                          json={"status": "paused"})
+    assert paused.status_code == 200 and paused.json()["schedule"]["status"] == "paused"
+    invalid = client.post("/api/recurring-transactions", headers=headers_a,
+                          json={**body, "day_of_month": 29, "id": "forged"})
+    assert invalid.status_code == 422
+
+    bot_secret = "recurring-test-bot-secret-0123456789012345"
+    monkeypatch.setattr(api, "BOT_SECRET", bot_secret)
+    bot_headers = {"Authorization": "Bearer " + bot_secret, "Idempotency-Key": "telegram-77"}
+    bot_body = {"telegram_user_id": 123456, "telegram_chat_id": 123456, "schedule": body}
+    assert client.post("/internal/bot/financial/recurring-transactions", headers=bot_headers,
+                       json=bot_body).status_code == 403
+    with store.engine.begin() as connection:
+        connection.execute(store.telegram_connections.insert().values(
+            principal="owner-a", telegram_user_id=123456, linked_at=int(time.time())))
+    bot_created = client.post("/internal/bot/financial/recurring-transactions", headers=bot_headers,
+                              json=bot_body)
+    assert bot_created.status_code == 201
+    bot_retry = client.post("/internal/bot/financial/recurring-transactions", headers=bot_headers,
+                            json=bot_body)
+    assert bot_retry.status_code == 201
+    assert bot_retry.json()["schedule"]["id"] == bot_created.json()["schedule"]["id"]

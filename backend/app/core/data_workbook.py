@@ -19,7 +19,7 @@ from openpyxl.utils.exceptions import InvalidFileException
 from sqlalchemy import delete, insert, select, update
 
 from . import store
-from .domain import Invalid, KINDS, credit_replay, day, empty, loan_balance, replay
+from .domain import Invalid, KINDS, credit_replay, day, decimal, empty, loan_balance, replay
 
 FORMAT_VERSION = 1
 APP_VERSION = "1"
@@ -518,8 +518,12 @@ def _validate_tables(metadata, rows_by_sheet):
     if not isinstance(state_row, dict) or set(state_row) != {"id", "schema_version", "data"} or state_row["id"] != 1 or state_row["schema_version"] != 1:
         raise WorkbookError("Planner State must reconstruct the supported planner_state row")
     data = state_row["data"]
+    # Backups predating recurring schedules remain importable.
+    if isinstance(data, dict):
+        data.setdefault("recurring_schedules", [])
     expected = {"accounts": dict, "credit_accounts": dict, "events": list, "loans": dict,
-                "prices": dict, "fx": dict, "receipts": dict, "bot": dict, "provider_status": dict}
+                "prices": dict, "fx": dict, "receipts": dict, "recurring_schedules": list,
+                "bot": dict, "provider_status": dict}
     if not isinstance(data, dict):
         raise WorkbookError("Planner State data must be an object")
     for key, kind in expected.items():
@@ -542,6 +546,59 @@ def _validate_tables(metadata, rows_by_sheet):
     for loan_id, loan in loans.items():
         if not isinstance(loan, dict) or loan.get("id") != loan_id or not isinstance(loan.get("rates"), list):
             raise WorkbookError("Loan IDs or rates are malformed")
+    schedule_ids = set()
+    for schedule in data["recurring_schedules"]:
+        if (not isinstance(schedule, dict) or not isinstance(schedule.get("id"), str)
+                or schedule["id"] in schedule_ids or schedule.get("cadence") not in ("monthly", "annual")
+                or schedule.get("status") not in ("active", "paused", "stopped")):
+            raise WorkbookError("Recurring schedule IDs, cadence, or status are invalid")
+        account = accounts.get(schedule.get("account"))
+        day_number, month_number = schedule.get("day_of_month"), schedule.get("month_of_year")
+        if (not account or account.get("type") != "bank"
+                or not isinstance(day_number, int) or isinstance(day_number, bool)
+                or not isinstance(schedule.get("amount"), str)
+                or not isinstance(schedule.get("description"), str)
+                or not isinstance(schedule.get("next_due_date"), str)):
+            raise WorkbookError("Recurring schedule fields or bank account are invalid")
+        if schedule["cadence"] == "monthly":
+            if not 1 <= day_number <= 28 or month_number is not None:
+                raise WorkbookError("Monthly schedule date is invalid")
+        else:
+            maximum = 28 if month_number == 2 else 30 if month_number in (4, 6, 9, 11) else 31
+            if (not isinstance(month_number, int) or isinstance(month_number, bool)
+                    or not 1 <= month_number <= 12 or not 1 <= day_number <= maximum):
+                raise WorkbookError("Annual schedule date must be valid every year")
+        try:
+            amount = decimal(schedule["amount"], positive=True)
+            decimal(schedule.get("initial_amount", schedule["amount"]), positive=True)
+            next_due = date.fromisoformat(schedule["next_due_date"])
+            if schedule.get("currency") != account.get("currency", "SGD"):
+                raise ValueError
+            if not schedule["description"].strip() or len(schedule["description"]) > 160:
+                raise ValueError
+            if schedule["cadence"] == "monthly" and next_due.day != day_number:
+                raise ValueError
+            if schedule["cadence"] == "annual" and (next_due.month != month_number or next_due.day != day_number):
+                raise ValueError
+            changes = schedule.get("amount_changes", [])
+            if not isinstance(changes, list):
+                raise ValueError
+            previous_effective = None
+            for change in changes:
+                if not isinstance(change, dict) or not isinstance(change.get("effective_from_due_date"), str):
+                    raise ValueError
+                effective = date.fromisoformat(change["effective_from_due_date"])
+                decimal(change.get("amount"), positive=True)
+                if schedule["cadence"] == "monthly" and effective.day != day_number:
+                    raise ValueError
+                if schedule["cadence"] == "annual" and (effective.month != month_number or effective.day != day_number):
+                    raise ValueError
+                if previous_effective is not None and effective < previous_effective:
+                    raise ValueError
+                previous_effective = effective
+        except (ValueError, TypeError) as exc:
+            raise WorkbookError("Recurring schedule amount or next due date is invalid") from exc
+        schedule_ids.add(schedule["id"])
     event_ids, orders = set(), set()
     for event in data["events"]:
         if not isinstance(event, dict) or not {"id", "order", "kind", "date", "status", "data"} <= event.keys():

@@ -67,6 +67,16 @@ class BackendClient:
         response.raise_for_status()
         return response.json()
 
+    def create_recurring_transaction(self, schedule, key, telegram_user_id, telegram_chat_id):
+        """Create an actor-scoped recurring ledger deduction schedule."""
+        response = self.client.post(
+            "/internal/bot/financial/recurring-transactions",
+            json={**self._actor_body(telegram_user_id, telegram_chat_id),
+                  "schedule": schedule},
+            headers={**self._auth_headers(), "Idempotency-Key": key})
+        response.raise_for_status()
+        return response.json()
+
     def user_state(self, telegram_user_id, telegram_chat_id, action, **fields):
         allowed_state_fields = {"session", "pending_reply", "pending_markup", "last_tvm"}
         if action == "set" and (not fields or set(fields) - allowed_state_fields):
@@ -229,7 +239,9 @@ def main():
                                             command, payload, key, uid, chat_id),
                                         lambda: state_cache, save_state,
                                         calculate=backend.calculate,
-                                        confirm_link=backend.confirm_telegram_link)
+                                        confirm_link=backend.confirm_telegram_link,
+                                        create_recurring=lambda schedule, key: backend.create_recurring_transaction(
+                                            schedule, key, uid, chat_id))
                         if result:
                             # Handler writes a per-user pending reply before delivery so a
                             # failed Telegram send can be retried on that user's next update.
