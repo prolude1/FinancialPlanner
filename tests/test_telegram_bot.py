@@ -205,6 +205,35 @@ def test_recurring_annual_rejects_date_that_is_not_valid_every_year():
     assert persisted["session"]["index"] == 5
 
 
+def test_recurring_annual_saves_selected_month_as_integer():
+    from app.telegram_bot.handlers import handle
+
+    actor = 506
+    persisted = {"session": None}
+    created = []
+    dashboard = {"accounts": [{"id": "bank", "name": "Main", "type": "bank",
+                               "currency": "SGD", "archived": False,
+                               "native": {}, "complete": True}],
+                 "credit_accounts": []}
+
+    def send(update_id, text):
+        update = {"update_id": update_id, "message": {"from": {"id": actor},
+            "chat": {"id": actor, "type": "private"}, "text": text}}
+        return handle(update, actor, lambda: dashboard, lambda *_: pytest.fail("wrong mutation"),
+                      lambda: dict(persisted), lambda **fields: persisted.update(fields),
+                      create_recurring=lambda schedule, key: created.append((schedule, key)) or
+                      {"schedule": {"id": "annual-1", "next_due_date": "2027-09-15"}})
+
+    for update_id, text in enumerate(("/recurring", "bank", "annual", "SGD 30",
+                                      "Annual bill", "15", "9"), 1):
+        send(update_id, text)
+    assert "month_of_year: 9" in persisted["pending_reply"]
+    send(8, "/confirm")
+    assert created == [({"account": "bank", "amount": "30", "description": "Annual bill",
+                         "cadence": "annual", "day_of_month": 15, "month_of_year": 9},
+                        "telegram-8")]
+
+
 def test_handler_rejects_group_or_mismatched_actor_without_backend_calls():
     from app.telegram_bot.handlers import handle
 

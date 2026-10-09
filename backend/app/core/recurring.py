@@ -115,6 +115,17 @@ def _schedule(state, schedule_id):
                  if item.get("id") == schedule_id), None)
 
 
+def delete_schedule(state, schedule_id):
+    """Remove a schedule so it cannot post again; existing ledger events remain intact."""
+    schedules = state.setdefault("recurring_schedules", [])
+    for index, schedule in enumerate(schedules):
+        if schedule.get("id") == schedule_id:
+            removed = schedules.pop(index)
+            state["revision"] = state.get("revision", 0) + 1
+            return _public(removed, state)
+    raise KeyError("Recurring schedule not found")
+
+
 def update_schedule(state, schedule_id, changes, today):
     schedule = _schedule(state, schedule_id)
     if schedule is None:

@@ -675,6 +675,9 @@ def handle(update, actor_id, query, mutate, load_state, save_state,
                     save_state(session=session, pending_reply=result,
                                pending_markup=session_keyboard(session, state))
                     return result
+                # The generic field handler stores text. The backend schema
+                # requires an integer month, so normalize it before review/save.
+                session["data"]["month_of_year"] = month
         # CPF subtype is meaningful only for CPF accounts. Bank and brokerage
         # setup proceeds directly to confirmation after the currency prompt.
         if (session["command"] == "account_add"

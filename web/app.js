@@ -119,6 +119,16 @@ function openRecurringAmount(scheduleId){
     }catch(error){$('#recurring-amount-error').textContent=error.message||'Unable to update the recurring amount.';button.disabled=false;}
   };
 }
+async function deleteRecurringSchedule(scheduleId){
+  const schedule=recurringSchedules?.find(item=>item.id===scheduleId);
+  if(!schedule)return;
+  const name=schedule.description||'this recurring schedule';
+  if(!window.confirm(`Delete “${name}”? Future ledger entries will stop. Transactions already posted will remain in your history.`))return;
+  try{
+    await api(`/recurring-transactions/${encodeURIComponent(schedule.id)}`,{method:'DELETE'});
+    recurringSchedules=null;await loadRecurringSchedules();toast('Recurring schedule deleted. Existing ledger transactions were kept.');
+  }catch(error){toast(error.message||'Unable to delete the recurring schedule.');}
+}
 function input(name,label,type='text',value='',extra=''){return `<label>${label}<input name="${name}" type="${type}" value="${esc(value)}" ${extra} required></label>`;}
 function openModal(title,html){$('#modal-title').textContent=title;$('#modal-body').innerHTML=html;$('#modal').showModal();}
 function formFooter(label){return `<p id="form-error" class="error" role="alert"></p><div class="form-actions"><button type="button" class="secondary" data-action="close">Cancel</button><button type="submit">${label}</button></div>`;}
@@ -147,6 +157,7 @@ document.addEventListener('click',e=>{
   if(action==='cashflow-retry')loadBankCashflow(bankCashflowYear);
   if(action==='recurring-retry'){recurringSchedules=null;loadRecurringSchedules();}
   if(action==='recurring-edit-amount')openRecurringAmount(b.dataset.id);
+  if(action==='recurring-delete')deleteRecurringSchedule(b.dataset.id);
   if(action==='history-reset')resetHistoryFilters();
   if(action==='backup-confirm')confirmBackupImport();
   if(action==='backup-cancel')cancelBackupImport();

@@ -563,6 +563,19 @@ def update_recurring_transaction(schedule_id: str, payload: RecurringSchedulePat
     return {"schedule": schedule}
 
 
+@app.delete("/api/recurring-transactions/{schedule_id}", status_code=200)
+def delete_recurring_transaction(schedule_id: str, request: Request, response: Response):
+    principal = keycloak_principal(request)
+    try:
+        with ledger_service.transaction(principal) as state:
+            schedule = recurring_service.delete_schedule(state, schedule_id)
+    except KeyError:
+        raise HTTPException(404, detail={"code": "recurring_schedule_not_found",
+            "message": "Recurring schedule not found"}) from None
+    response.headers["Cache-Control"] = "no-store"
+    return {"schedule": schedule}
+
+
 @app.post("/api/calculators/time-value")
 def calculate_time_value(payload: TimeValue, request: Request):
     actor = identity(request)

@@ -16,6 +16,7 @@ async function main() {
     'paused', 'do not initiate bank payments']) assert(html.includes(text), `missing rendered text: ${text}`);
   assert(recurringSchedulesPanel({ schedules: [] }).includes('No recurring schedules'));
   assert(html.includes('data-action="recurring-edit-amount"'));
+  assert(html.includes('data-action="recurring-delete"'));
   assert(!recurringSchedulesPanel({ schedules: [{ id: 'stopped', cadence: 'monthly', day_of_month: 1, amount: '1', status: 'stopped' }] }).includes('data-action="recurring-edit-amount"'));
   assert(recurringAmountForm({ id: 'monthly-1', amount: '123.45', currency: 'SGD' }).includes('affects future postings only'));
   assert(recurringSchedulesPanel({ loading: true }).includes('Loading active schedules'));
@@ -23,6 +24,8 @@ async function main() {
 
   const app = fs.readFileSync('web/app.js', 'utf8');
   assert(app.includes("api('/recurring-transactions')"), 'recurring page loads from authenticated API client');
+  assert(app.includes("method:'DELETE'"), 'recurring schedule deletion uses the authenticated API client');
+  assert(app.includes('Transactions already posted will remain in your history.'), 'deletion explains posted transactions are preserved');
   assert(app.includes("page==='recurring'"), 'recurring page is routed in the application');
   const index = fs.readFileSync('web/index.html', 'utf8');
   assert(index.includes('href="#recurring" data-nav="recurring"'), 'recurring page is in primary navigation');

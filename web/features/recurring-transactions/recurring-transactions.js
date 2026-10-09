@@ -30,8 +30,8 @@ function recurringScheduleRow(schedule) {
   const nextDueDate = schedule.next_due_date || schedule.nextDueDate;
   const nextDue = nextDueDate ? `<small>Next posting · ${escapeHtml(nextDueDate)}</small>` : '';
   const status = schedule.status && schedule.status !== 'active' ? `<small class="recurring-schedule-status">${escapeHtml(schedule.status)}</small>` : '';
-  const edit = schedule.status === 'stopped' ? '' : `<button type="button" class="secondary small-button" data-action="recurring-edit-amount" data-id="${escapeHtml(schedule.id)}">Edit amount</button>`;
-  return `<article class="recurring-schedule-row"><div class="recurring-schedule-main"><strong>${name}</strong>${account}<span class="recurring-schedule-frequency">${recurringScheduleFrequency(schedule)}</span>${nextDue}${status}</div><strong class="recurring-schedule-amount">${amountText(schedule.amount, schedule.currency)}</strong>${edit}</article>`;
+  const actions = schedule.status === 'stopped' ? '' : `<div class="recurring-schedule-actions"><button type="button" class="secondary small-button" data-action="recurring-edit-amount" data-id="${escapeHtml(schedule.id)}">Edit amount</button><button type="button" class="secondary small-button" data-action="recurring-delete" data-id="${escapeHtml(schedule.id)}">Delete</button></div>`;
+  return `<article class="recurring-schedule-row"><div class="recurring-schedule-main"><strong>${name}</strong>${account}<span class="recurring-schedule-frequency">${recurringScheduleFrequency(schedule)}</span>${nextDue}${status}</div><strong class="recurring-schedule-amount">${amountText(schedule.amount, schedule.currency)}</strong>${actions}</article>`;
 }
 
 /** Render the active-schedule list from the frontend's normalized view model. */

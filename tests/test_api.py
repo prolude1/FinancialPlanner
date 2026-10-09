@@ -1009,6 +1009,11 @@ def test_recurring_schedule_api_is_tenant_and_link_scoped(client, monkeypatch):
     paused = client.patch(f"/api/recurring-transactions/{schedule['id']}", headers=headers_a,
                           json={"status": "paused"})
     assert paused.status_code == 200 and paused.json()["schedule"]["status"] == "paused"
+    assert client.delete(f"/api/recurring-transactions/{schedule['id']}", headers=headers_b).status_code == 404
+    deleted = client.delete(f"/api/recurring-transactions/{schedule['id']}", headers=headers_a)
+    assert deleted.status_code == 200 and deleted.json()["schedule"]["id"] == schedule["id"]
+    assert client.get("/api/recurring-transactions", headers=headers_a).json()["schedules"] == []
+    assert client.delete(f"/api/recurring-transactions/{schedule['id']}", headers=headers_a).status_code == 404
     invalid = client.post("/api/recurring-transactions", headers=headers_a,
                           json={**body, "day_of_month": 29, "id": "forged"})
     assert invalid.status_code == 422
