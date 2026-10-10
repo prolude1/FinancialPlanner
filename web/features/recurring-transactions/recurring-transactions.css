@@ -5,5 +5,7 @@
 .recurring-schedule-main small,.recurring-schedule-frequency{color:var(--muted,#66736d);font-size:.85rem}
 .recurring-schedule-amount{white-space:nowrap;font-variant-numeric:tabular-nums}
 .recurring-schedule-actions{display:flex;flex-wrap:wrap;gap:.5rem}
+.recurring-delete-button{background:var(--red,#a63e36);color:#fff}
+.recurring-delete-button:hover{background:#872f29}
 .recurring-schedule-status{text-transform:capitalize}
 @media(max-width:520px){.recurring-schedule-row{align-items:flex-start;flex-direction:column;gap:.5rem}}
