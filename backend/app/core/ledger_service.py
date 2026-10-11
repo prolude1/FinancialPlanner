@@ -23,6 +23,8 @@ class LedgerRepository(Protocol):
 
     def read_portfolio_history(self, principal: str | None = None) -> dict[str, Any]: ...
 
+    def read_portfolio_deposit_history(self, principal: str | None = None) -> dict[str, Any]: ...
+
 
 class FinancialLedgerService:
     """Resolve storage operations for an already-authenticated caller.
@@ -57,3 +59,6 @@ class FinancialLedgerService:
 
     def portfolio_history(self, principal: str | None) -> dict[str, Any]:
         return self._repository.read_portfolio_history(principal)
+
+    def portfolio_deposits(self, principal: str | None) -> dict[str, Any]:
+        return self._repository.read_portfolio_deposit_history(principal)

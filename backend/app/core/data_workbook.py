@@ -853,7 +853,8 @@ def commit_import(workbook_hash, current_revision, current_etag, token, principa
             c.execute(update(store.state).where(store.state.c.id == 1).values(
                 schema_version=state_row["schema_version"], data=state_row["data"]))
             c.execute(update(store.bot_runtime).where(store.bot_runtime.c.id == 1).values(data=imported_bot))
-            for table in (store.instruments, store.portfolio_history, store.stock_cache):
+            for table in (store.instruments, store.portfolio_history,
+                          store.portfolio_deposit_history, store.stock_cache):
                 c.execute(delete(table))
             if instruments:
                 c.execute(insert(store.instruments), instruments)
@@ -867,6 +868,8 @@ def commit_import(workbook_hash, current_revision, current_etag, token, principa
             c.execute(store.tenant_ledger.insert().values(principal=principal,
                 schema_version=state_row["schema_version"], data=tenant_data))
             c.execute(delete(store.tenant_portfolio_history).where(store.tenant_portfolio_history.c.principal == principal))
+            c.execute(delete(store.tenant_portfolio_deposit_history).where(
+                store.tenant_portfolio_deposit_history.c.principal == principal))
             if history:
                 c.execute(insert(store.tenant_portfolio_history), [dict(row, principal=principal) for row in history])
     try:

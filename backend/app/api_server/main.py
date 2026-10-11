@@ -333,6 +333,7 @@ async def bot_financial_dashboard(request: Request, response: Response):
     except PermissionError:
         raise HTTPException(403, detail={"code": "telegram_not_linked", "message": "Link this private Telegram account to continue"}) from None
     result["portfolio_history"] = ledger_service.portfolio_history(principal)
+    result["portfolio_deposits"] = ledger_service.portfolio_deposits(principal)
     response.headers["Cache-Control"] = "no-store"
     return result
 
@@ -509,6 +510,7 @@ def get_dashboard(request: Request):
     snapshot = ledger_service.read(principal)
     result = dashboard(snapshot, today(), actor=actor)
     result["portfolio_history"] = ledger_service.portfolio_history(principal)
+    result["portfolio_deposits"] = ledger_service.portfolio_deposits(principal)
     return result
 
 

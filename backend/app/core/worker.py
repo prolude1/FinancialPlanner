@@ -1,5 +1,5 @@
 """Free daily quote adapters. Provider failures never erase cached valuations."""
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 import logging
 import os
@@ -208,12 +208,37 @@ def build_portfolio_history(snapshot, quotes, rates, today):
     return rows
 
 
+def build_portfolio_deposit_history(snapshot, rates, today):
+    """Convert active brokerage deposits independently of daily price coverage."""
+    accounts = {account_id for account_id, account in snapshot["accounts"].items()
+                if account["type"] == "brokerage" and not account.get("archived")}
+    deposits = {}
+    for event in active_events(snapshot, today):
+        payload = event["data"]
+        account_id = payload.get("account")
+        if event["kind"] != "deposit" or account_id not in accounts:
+            continue
+        key = (account_id, event["date"])
+        deposit = deposits.setdefault(key, {"account": account_id, "date": event["date"],
+                                            "amount": Decimal(0), "complete": True})
+        currency = payload.get("currency", "SGD")
+        rate = Decimal(1) if currency == "SGD" else _at_or_before(rates.get(currency, {}), date.fromisoformat(event["date"]))
+        if rate is None:
+            deposit["complete"] = False
+        elif deposit["complete"]:
+            deposit["amount"] += decimal(payload["amount"]) * rate
+
+    return [{"account": deposit["account"], "date": deposit["date"],
+             "amount_sgd": str(deposit["amount"]) if deposit["complete"] else None}
+            for deposit in sorted(deposits.values(), key=lambda item: (item["account"], item["date"]))]
+
+
 def refresh_portfolio_history(principal=None):
     snapshot = store.read() if principal is None else store.read_for(principal)
     today = datetime.now(ZoneInfo(os.environ.get("APP_TIMEZONE", "Asia/Singapore"))).date()
     events = active_events(snapshot, today)
     if not events:
-        store.replace_portfolio_history([], principal=principal)
+        store.replace_portfolio_history([], principal=principal, deposit_rows=[])
         return 0
     start = min(datetime.fromisoformat(e["date"]).date() for e in events) - timedelta(days=7)
     instrument_rows = {}
@@ -243,7 +268,8 @@ def refresh_portfolio_history(principal=None):
             logging.warning("Historical FX refresh failed for %s/SGD", cur)
             raise
     rows = build_portfolio_history(snapshot, quotes, rates, today)
-    store.replace_portfolio_history(rows, principal=principal)
+    deposit_rows = build_portfolio_deposit_history(snapshot, rates, today)
+    store.replace_portfolio_history(rows, principal=principal, deposit_rows=deposit_rows)
     return len(rows)
 
 

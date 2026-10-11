@@ -53,6 +53,19 @@ tenant_portfolio_history = Table(
     Column("external_flow_sgd", String(64), nullable=False),
     Column("updated_at", DateTime(timezone=True), nullable=False),
 )
+portfolio_deposit_history = Table(
+    "portfolio_deposit_history", metadata,
+    Column("account", String(10), primary_key=True),
+    Column("date", String(10), primary_key=True),
+    Column("amount_sgd", String(64)),
+)
+tenant_portfolio_deposit_history = Table(
+    "tenant_portfolio_deposit_history", metadata,
+    Column("principal", String(64), primary_key=True),
+    Column("account", String(10), primary_key=True),
+    Column("date", String(10), primary_key=True),
+    Column("amount_sgd", String(64)),
+)
 bot_runtime = Table("bot_runtime", metadata,
     Column("id", Integer, primary_key=True), Column("data", JSON, nullable=False))
 legacy_claim = Table("legacy_ledger_claim", metadata,
@@ -287,16 +300,24 @@ def cache_instrument(row):
         c.execute(instruments.insert().values(**row))
 
 
-def replace_portfolio_history(rows, principal=None):
-    """Replace derived snapshots; the event ledger remains their source of truth."""
+def replace_portfolio_history(rows, principal=None, deposit_rows=None):
+    """Atomically replace valuation history and deposit-only projection inputs."""
     with engine.begin() as c:
         lock_application(c)
         table = portfolio_history if principal is None else tenant_portfolio_history
-        criteria = delete(table) if principal is None else delete(table).where(table.c.principal == principal)
-        c.execute(criteria)
+        deposits_table = portfolio_deposit_history if principal is None else tenant_portfolio_deposit_history
+        history_filter = delete(table) if principal is None else delete(table).where(table.c.principal == principal)
+        deposits_filter = delete(deposits_table) if principal is None else delete(deposits_table).where(
+            deposits_table.c.principal == principal)
+        c.execute(history_filter)
+        c.execute(deposits_filter)
         if rows:
             rows = [dict(row, **({} if principal is None else {"principal": principal})) for row in rows]
             c.execute(table.insert(), rows)
+        if deposit_rows:
+            deposit_rows = [dict(row, **({} if principal is None else {"principal": principal}))
+                            for row in deposit_rows]
+            c.execute(deposits_table.insert(), deposit_rows)
 
 
 def read_portfolio_history(principal=None):
@@ -310,6 +331,21 @@ def read_portfolio_history(principal=None):
         for row in rows:
             item = dict(row)
             item.pop("updated_at", None)
+            item.pop("principal", None)
+            result.setdefault(item.pop("account"), []).append(item)
+        return result
+
+
+def read_portfolio_deposit_history(principal=None):
+    table = portfolio_deposit_history if principal is None else tenant_portfolio_deposit_history
+    with engine.connect() as c:
+        stmt = select(table)
+        if principal is not None:
+            stmt = stmt.where(table.c.principal == principal)
+        rows = c.execute(stmt.order_by(table.c.account, table.c.date)).mappings()
+        result = {}
+        for row in rows:
+            item = dict(row)
             item.pop("principal", None)
             result.setdefault(item.pop("account"), []).append(item)
         return result

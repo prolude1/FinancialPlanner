@@ -3,7 +3,7 @@ from decimal import Decimal
 import uuid
 import pytest
 from app.core.worker import completed_session, resolve_trading_currency, provider_symbol
-from app.core.worker import build_portfolio_history, run_due
+from app.core.worker import build_portfolio_deposit_history, build_portfolio_history, run_due
 from app.core.catalog import parse_us_catalog
 from app.core.domain import apply, empty
 
@@ -64,6 +64,21 @@ def test_brokerage_history_separates_cash_flow_from_investment_movement():
     assert rows[1]["gross_change_sgd"] == "31.6"
     assert rows[1]["external_flow_sgd"] == "14.0"
     assert rows[1]["adjusted_change_sgd"] == "17.6"
+    deposits = build_portfolio_deposit_history(state,
+        {"USD": {date(2026, 1, 2): Decimal("1.4")}}, date(2026, 1, 2))
+    assert deposits == [{"account": account, "date": "2026-01-02", "amount_sgd": "14.0"}]
+
+
+def test_deposit_history_is_independent_of_prices_and_excludes_non_deposits():
+    state = empty()
+    def run(command, payload):
+        return apply(state, command, payload, "test", uuid.uuid4().hex, date(2026, 1, 2))
+    account = run("account_add", {"name": "Broker", "type": "brokerage", "currency": "SGD"})["id"]
+    run("opening_cash", {"account": account, "currency": "SGD", "amount": "100", "date": "2026-01-01"})
+    run("deposit", {"account": account, "currency": "SGD", "amount": "5000", "date": "2026-01-01"})
+    run("withdraw", {"account": account, "currency": "SGD", "amount": "20", "date": "2026-01-02"})
+    deposits = build_portfolio_deposit_history(state, {}, date(2026, 1, 2))
+    assert deposits == [{"account": account, "date": "2026-01-01", "amount_sgd": "5000"}]
 
 
 def test_provider_schedule_backs_off_after_failure():

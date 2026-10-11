@@ -146,6 +146,7 @@ document.addEventListener('click',e=>{
   const action=b.dataset.action;
   if(action==='chart-period'){const root=b.closest('.brokerage-chart'),rows=data.portfolio_history[root.dataset.account]||[],state=chartState[root.dataset.account];state.period=b.dataset.value;[state.start,state.end]=dashboardPages.historyRange(rows,state.period);dashboardPages.drawBrokerageChart(root.dataset.account);}
   if(action==='chart-metric'){const root=b.closest('.brokerage-chart');chartState[root.dataset.account].metric=b.dataset.value;dashboardPages.drawBrokerageChart(root.dataset.account);}
+  if(action==='chart-projection'){const root=b.closest('.brokerage-chart'),state=chartState[root.dataset.account];state.showProjections=!state.showProjections;dashboardPages.drawBrokerageChart(root.dataset.account);}
   if(action==='stock-search')searchStocks();
   if(action==='backup-export')exportBackup();
   if(action==='backup-sample')downloadBackupTemplate();
