@@ -125,6 +125,22 @@ and Telegram dashboard endpoints live in `api_server/dashboard_routes.py`.
 Its `DashboardQueryService` reads the selected ledger once and assembles the
 dashboard view for both routes. Only the browser route adds portfolio valuations
 and deposit projections.
+`GET /api/accounts/{account_id}/brokerage-history` returns only that brokerage's
+persisted valuation and deposit rows, plus `account_id` and `as_of`. Its
+`BrokerageHistoryQueryService` validates ownership through the existing ledger
+service; repository queries filter by both principal and account. Unknown,
+foreign, and non-brokerage accounts return the same 404. The response is marked
+`Cache-Control: no-store` and does not assemble the dashboard or transaction
+history. Archived brokerages retain their historical chart access.
+
+The browser still polls `/api/revision` every five seconds and reloads the
+dashboard when the ledger revision or local date changes. With an unchanged
+revision and an open brokerage, it refreshes only that account's chart data
+every thirty seconds through `brokerage-history-refresh.js`. Chart refresh
+tracking is per account; late responses are discarded after navigation,
+logout, or a full dashboard reload. Chart state and unrelated forms remain
+intact, and failed requests retain the previous chart and allow retry.
+
 The router receives the existing authentication helpers from `main.py`, so
 identity policy remains at the API boundary. The browser
 uses `web/core/api-client.js` for authenticated API transport and JSON error

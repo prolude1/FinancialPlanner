@@ -27,6 +27,8 @@ from ..core.views import cashflow_summary
 from ..core import data_workbook
 from ..core import keycloak_identity, telegram_linking, recurring as recurring_service
 from .dashboard_routes import DashboardQueryService, create_dashboard_router
+from .brokerage_history_routes import (BrokerageHistoryQueryService,
+                                      create_brokerage_history_router)
 
 ledger_service = FinancialLedgerService(store)
 
@@ -620,4 +622,8 @@ async def mutate(command: str, request: Request):
 dashboard_query_service = DashboardQueryService(ledger_service, today)
 app.include_router(create_dashboard_router(
     dashboard_query_service, ledger_access, linked_bot_principal,
+))
+brokerage_history_query_service = BrokerageHistoryQueryService(ledger_service, today)
+app.include_router(create_brokerage_history_router(
+    brokerage_history_query_service, ledger_access,
 ))

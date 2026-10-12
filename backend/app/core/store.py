@@ -414,6 +414,24 @@ def read_portfolio_history(principal=None):
         return result
 
 
+def read_portfolio_history_for_account(account_id, principal=None):
+    """Read valuation rows for one account within one ledger scope."""
+    table = portfolio_history if principal is None else tenant_portfolio_history
+    with engine.connect() as c:
+        stmt = select(table).where(table.c.account == account_id)
+        if principal is not None:
+            stmt = stmt.where(table.c.principal == principal)
+        rows = c.execute(stmt.order_by(table.c.date)).mappings()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item.pop("updated_at", None)
+            item.pop("principal", None)
+            item.pop("account", None)
+            result.append(item)
+        return result
+
+
 def read_portfolio_deposit_history(principal=None):
     table = portfolio_deposit_history if principal is None else tenant_portfolio_deposit_history
     with engine.connect() as c:
@@ -426,6 +444,23 @@ def read_portfolio_deposit_history(principal=None):
             item = dict(row)
             item.pop("principal", None)
             result.setdefault(item.pop("account"), []).append(item)
+        return result
+
+
+def read_portfolio_deposit_history_for_account(account_id, principal=None):
+    """Read deposit rows for one account within one ledger scope."""
+    table = portfolio_deposit_history if principal is None else tenant_portfolio_deposit_history
+    with engine.connect() as c:
+        stmt = select(table).where(table.c.account == account_id)
+        if principal is not None:
+            stmt = stmt.where(table.c.principal == principal)
+        rows = c.execute(stmt.order_by(table.c.date)).mappings()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item.pop("principal", None)
+            item.pop("account", None)
+            result.append(item)
         return result
 
 

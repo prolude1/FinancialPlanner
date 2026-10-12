@@ -273,6 +273,101 @@ def test_financial_routes_derive_tenant_only_from_authenticated_principal(isolat
     assert client.get("/api/dashboard").status_code == 401
 
 
+def test_account_brokerage_history_is_authenticated_scoped_and_never_builds_dashboard(
+        isolated_store, monkeypatch):
+    for principal, account_id in (("owner-a", "acct-a"), ("owner-b", "acct-b")):
+        with store.tenant_transaction(principal) as state:
+            state["accounts"][account_id] = {"id": account_id, "name": account_id,
+                "type": "brokerage", "currency": "SGD", "cpf_type": "", "archived": False}
+            state["accounts"]["bank-" + account_id] = {"id": "bank-" + account_id,
+                "name": "Bank", "type": "bank", "currency": "SGD", "cpf_type": "", "archived": False}
+            if principal == "owner-a":
+                state["accounts"]["extra-account"] = {"id": "extra-account", "name": "Other broker",
+                    "type": "brokerage", "currency": "SGD", "cpf_type": "", "archived": False}
+    now = datetime.now(timezone.utc)
+    with isolated_store.begin() as connection:
+        for principal, account_id in (("owner-a", "acct-a"), ("owner-b", "acct-b")):
+            connection.execute(insert(store.tenant_portfolio_history).values(
+                principal=principal, account=account_id, date="2026-01-01", value_sgd="100",
+                gross_change_sgd=None, adjusted_change_sgd=None, external_flow_sgd=None, updated_at=now))
+            connection.execute(insert(store.tenant_portfolio_deposit_history).values(
+                principal=principal, account=account_id, date="2026-01-01", amount_sgd="25",
+                missing_fx_count=1, stale_fx_count=2, stale_fx_last_success_at="2025-12-31T12:00:00Z"))
+        connection.execute(insert(store.tenant_portfolio_history).values(
+            principal="owner-a", account="extra-account", date="2026-01-01", value_sgd="999",
+            gross_change_sgd=None, adjusted_change_sgd=None, external_flow_sgd=None, updated_at=now))
+        connection.execute(insert(store.tenant_portfolio_deposit_history).values(
+            principal="owner-a", account="extra-account", date="2026-01-01", amount_sgd="999",
+            missing_fx_count=0, stale_fx_count=0, stale_fx_last_success_at=None))
+
+    monkeypatch.setattr(api, "verified_keycloak_principal",
+                        lambda request: request.headers["Authorization"].split()[-1])
+    scoped_reads = []
+    read_history = store.read_portfolio_history_for_account
+    read_deposits = store.read_portfolio_deposit_history_for_account
+    monkeypatch.setattr(store, "read_portfolio_history_for_account",
+        lambda account_id, principal=None: (scoped_reads.append(("history", principal, account_id)),
+            read_history(account_id, principal))[1])
+    monkeypatch.setattr(store, "read_portfolio_deposit_history_for_account",
+        lambda account_id, principal=None: (scoped_reads.append(("deposits", principal, account_id)),
+            read_deposits(account_id, principal))[1])
+    monkeypatch.setattr("app.api_server.dashboard_routes.build_dashboard",
+                        lambda *_args, **_kwargs: pytest.fail("dashboard assembly should not run"))
+    client = TestClient(api.app)
+    endpoint = "/api/accounts/acct-a/brokerage-history"
+    assert client.get(endpoint).status_code == 401
+    response = client.get(endpoint, headers={"Authorization": "Bearer owner-a"})
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    body = response.json()
+    assert set(body) == {"account_id", "as_of", "portfolio_history", "portfolio_deposits"}
+    assert body["account_id"] == "acct-a"
+    assert body["as_of"] == api.today().isoformat()
+    assert body["portfolio_history"] == [{"date": "2026-01-01", "value_sgd": "100",
+        "gross_change_sgd": None, "adjusted_change_sgd": None, "external_flow_sgd": None}]
+    assert body["portfolio_deposits"] == [{"date": "2026-01-01", "amount_sgd": "25",
+        "missing_fx_count": 1, "stale_fx_count": 2,
+        "stale_fx_last_success_at": "2025-12-31T12:00:00Z"}]
+    assert scoped_reads == [("history", "owner-a", "acct-a"), ("deposits", "owner-a", "acct-a")]
+    assert client.get("/api/accounts/acct-b/brokerage-history",
+        headers={"Authorization": "Bearer owner-a"}).status_code == 404
+    assert client.get("/api/accounts/bank-acct-a/brokerage-history",
+        headers={"Authorization": "Bearer owner-a"}).status_code == 404
+    assert client.get("/api/accounts/unknown/brokerage-history",
+        headers={"Authorization": "Bearer owner-a"}).status_code == 404
+
+
+def test_account_brokerage_history_allows_archived_account_with_empty_projections(isolated_store, monkeypatch):
+    with store.tenant_transaction("owner") as state:
+        state["accounts"]["archived"] = {"id": "archived", "name": "Old broker",
+            "type": "brokerage", "currency": "SGD", "cpf_type": "", "archived": True}
+    monkeypatch.setattr(api, "verified_keycloak_principal", lambda _request: "owner")
+    response = TestClient(api.app).get("/api/accounts/archived/brokerage-history",
+        headers={"Authorization": "Bearer token"})
+    assert response.status_code == 200
+    assert response.json()["portfolio_history"] == []
+    assert response.json()["portfolio_deposits"] == []
+
+
+def test_legacy_brokerage_history_stops_after_claim(isolated_store):
+    with store.transaction() as state:
+        state["accounts"]["legacy-broker"] = {"id": "legacy-broker", "name": "Legacy",
+            "type": "brokerage", "currency": "SGD", "cpf_type": "", "archived": False}
+    with isolated_store.begin() as connection:
+        connection.execute(insert(store.portfolio_history).values(account="legacy-broker",
+            date="2026-01-01", value_sgd="10", gross_change_sgd=None,
+            adjusted_change_sgd=None, external_flow_sgd=None, updated_at=datetime.now(timezone.utc)))
+    client = TestClient(api.app)
+    login = client.post("/api/login", json={"password": "test-password"},
+        headers={"Origin": "http://localhost:8080"})
+    assert login.status_code == 200
+    endpoint = "/api/accounts/legacy-broker/brokerage-history"
+    assert client.get(endpoint).json()["portfolio_history"][0]["value_sgd"] == "10"
+    code = store.issue_legacy_claim()
+    store.redeem_legacy_claim("new-owner", code)
+    assert client.get(endpoint).status_code == 403
+
+
 def test_legacy_password_and_bot_credentials_cannot_read_claimed_tenant(isolated_store, monkeypatch):
     secret = "legacy-bot-service-secret-that-is-long-enough"
     monkeypatch.setattr(api, "BOT_SECRET", secret)
