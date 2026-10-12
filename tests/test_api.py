@@ -932,6 +932,56 @@ def test_stock_identity_endpoint_is_authenticated(client, monkeypatch):
     fake.identity.assert_called_once_with("NASDAQ:AAPL")
 
 
+def test_stock_events_dividends_and_valuation_contracts_are_authenticated(client, monkeypatch):
+    fake = Mock()
+    fake.events.return_value = {"security_id": "NASDAQ:AAPL", "events": [], "cache": {"stale": False}}
+    fake.dividends.return_value = {"security_id": "NASDAQ:AAPL", "period_years": 5, "dividends": [],
+                                   "cache": {"stale": False}}
+    monkeypatch.setattr(api, "stock_service", fake)
+    assert client.get("/api/stocks/NASDAQ:AAPL/events").status_code == 401
+    assert client.get("/api/stocks/NASDAQ:AAPL/dividends").status_code == 401
+    headers = {"Authorization": "Bearer test-bot-secret"}
+    events = client.get("/api/stocks/NASDAQ:AAPL/events", headers=headers)
+    dividends = client.get("/api/stocks/NASDAQ:AAPL/dividends", headers=headers)
+    assert events.status_code == 200 and events.json()["events"] == []
+    assert dividends.status_code == 200 and dividends.json()["period_years"] == 5
+    valuation = client.post("/api/stocks/NASDAQ:AAPL/valuation", headers=headers, json={
+        "method": "pe", "currency": "USD", "eps": "2", "multiples": ["10", "15"],
+        "reference_price": "20"})
+    assert valuation.status_code == 200
+    assert valuation.headers["cache-control"] == "no-store"
+    assert [row["value_per_share"] for row in valuation.json()["scenarios"]] == ["20", "30"]
+    assert client.post("/api/stocks/NASDAQ:AAPL/valuation", headers=headers, json={
+        "method": "dcf", "currency": "USD", "free_cash_flow_per_share": "1",
+        "annual_growth_percent": "3", "discount_rate_percent": "5",
+        "terminal_growth_percent": "5", "years": 5}).status_code == 422
+    assert client.post("/api/stocks/NASDAQ:AAPL/valuation", headers=headers, json={
+        "method": "pe", "currency": "USD", "eps": True, "multiples": ["10"]}).status_code == 422
+    assert client.post("/api/stocks/NASDAQ:AAPL/valuation", headers=headers, json={
+        "method": "dcf", "currency": "USD", "free_cash_flow_per_share": "1",
+        "annual_growth_percent": "3", "discount_rate_percent": "5",
+        "terminal_growth_percent": "2", "years": 3.0}).status_code == 422
+
+
+def test_holdings_dividend_endpoint_uses_keycloak_principal_not_shared_cache(client, monkeypatch):
+    history = {"security_id": "NASDAQ:AAPL", "period_years": 5, "dividends": []}
+    fake = Mock()
+    fake.dividends.return_value = history
+    monkeypatch.setattr(api, "stock_service", fake)
+    monkeypatch.setattr(api, "verified_keycloak_principal", lambda request: "owner-a"
+                        if request.headers.get("Authorization") == "Bearer owner-token"
+                        else (_ for _ in ()).throw(api.HTTPException(401, "invalid token")))
+    monkeypatch.setattr(api.stock_dividend_income, "estimate", lambda principal, security_id, supplied: {
+        "principal": principal, "security_id": security_id, "dividends": supplied["dividends"]})
+    assert client.get("/api/stocks/NASDAQ:AAPL/dividends/holdings",
+                      headers={"Authorization": "Bearer test-bot-secret"}).status_code == 401
+    response = client.get("/api/stocks/NASDAQ:AAPL/dividends/holdings",
+                          headers={"Authorization": "Bearer owner-token"})
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    assert response.json() == {"principal": "owner-a", "security_id": "NASDAQ:AAPL", "dividends": []}
+
+
 def test_data_export_and_import_require_keycloak_principal_and_are_tenant_scoped(client, monkeypatch):
     monkeypatch.setattr(api, "keycloak_principal", lambda request: "owner-a"
         if request.headers.get("Authorization") == "Bearer owner-a" else (_ for _ in ()).throw(

@@ -13,8 +13,9 @@ from sqlalchemy import select
 from ..core import store
 from ..core.domain import apply, Invalid
 from ..core.finance import time_value
-from ..core.schemas import (Login, TimeValue, TelegramLinkConfirm, RecurringScheduleCreate,
-                            RecurringSchedulePatch, RecurringBotScheduleCreate, validate_command)
+from ..core.schemas import (Login, TimeValue, StockValuation, TelegramLinkConfirm,
+                            RecurringScheduleCreate, RecurringSchedulePatch,
+                            RecurringBotScheduleCreate, validate_command)
 from ..core.command_service import (
     CommandConflictError,
     CommandFieldsError,
@@ -24,6 +25,8 @@ from ..core.command_service import (
 from ..core.stocks import StockProviderError, service as stock_service
 from ..core.ledger_service import FinancialLedgerService
 from ..core.research_watchlist import ResearchWatchlistService
+from ..core.stock_dividend_income import HoldingsDividendIncomeService
+from ..core.stock_valuation import StockValuationService, ValuationInputError
 from ..core.views import cashflow_summary
 from ..core import data_workbook
 from ..core import keycloak_identity, telegram_linking, recurring as recurring_service
@@ -33,6 +36,8 @@ from .brokerage_history_routes import (BrokerageHistoryQueryService,
 
 ledger_service = FinancialLedgerService(store)
 research_watchlist = ResearchWatchlistService(ledger_service)
+stock_dividend_income = HoldingsDividendIncomeService(ledger_service)
+stock_valuation = StockValuationService()
 
 SECRET = os.environ.get("SESSION_SECRET", "")
 if len(SECRET) < 32:
@@ -609,6 +614,38 @@ def stock_quarterly_results(security_id: str, request: Request,
                             quarters: int = Query(default=8, ge=1, le=8)):
     identity(request)
     return stock_service.quarterly_results(security_id, quarters)
+
+
+@app.get("/api/stocks/{security_id}/events")
+def stock_events(security_id: str, request: Request):
+    identity(request)
+    return stock_service.events(security_id)
+
+
+@app.get("/api/stocks/{security_id}/dividends")
+def stock_dividends(security_id: str, request: Request):
+    identity(request)
+    return stock_service.dividends(security_id)
+
+
+@app.get("/api/stocks/{security_id}/dividends/holdings")
+def stock_dividend_holdings(security_id: str, request: Request, response: Response):
+    principal = verified_keycloak_principal(request)
+    history = stock_service.dividends(security_id)
+    response.headers["Cache-Control"] = "no-store"
+    return stock_dividend_income.estimate(principal, security_id, history)
+
+
+@app.post("/api/stocks/{security_id}/valuation")
+def stock_valuation_scenarios(security_id: str, payload: StockValuation, request: Request, response: Response):
+    identity(request)
+    from ..core.stocks import parse_security_id
+    exchange, symbol = parse_security_id(security_id)
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return stock_valuation.calculate(f"{exchange}:{symbol}", payload.model_dump(exclude_unset=True))
+    except ValuationInputError as exc:
+        raise HTTPException(422, detail={"code": "invalid_valuation_input", "message": str(exc)}) from None
 
 
 @app.get("/api/research/watchlist")

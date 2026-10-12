@@ -2,7 +2,11 @@
 let stockState={query:'',exchange:'',results:[],searching:false,error:'',selected:'',range:'1y',overview:null,candles:null,financials:null,loading:false,request:0,highlight:-1,suggestionsOpen:false,candleIndex:null};
 let stockSearchTimer=null,stockSearchController=null,stockLoadController=null;
 let quarterlyResultsPanel=()=>'';
-let holdingsResearchPanel=()=>'',financialTrendPanel=()=>'',researchWatchlist;
+let holdingsResearchPanel=()=>'',financialTrendPanel=()=>'',researchWatchlist,corporateActionsPanel,valuationSandbox;
+function resetStockResearch(){
+  clearTimeout(stockSearchTimer);stockSearchController?.abort();stockLoadController?.abort();
+  stockState={query:'',exchange:'',results:[],searching:false,error:'',selected:'',range:'1y',overview:null,candles:null,financials:null,loading:false,request:stockState.request+1,highlight:-1,suggestionsOpen:false,candleIndex:null};
+}
 function stockSearchPanel(){return `<div class="panel stock-search"><div class="stock-search-row"><label>Search by ticker or company<input id="stock-search-input" role="combobox" value="${esc(stockState.query)}" placeholder="AAPL, VWRA, DBS…" autocomplete="off" aria-autocomplete="list" aria-controls="stock-search-results" aria-expanded="${stockState.suggestionsOpen}" ${stockState.highlight>=0?`aria-activedescendant="stock-option-${stockState.highlight}"`:''}></label><label>Exchange<select id="stock-exchange"><option value="">All exchanges</option>${['NASDAQ','NYSE','LSE','SGX'].map(x=>`<option ${stockState.exchange===x?'selected':''}>${x}</option>`).join('')}</select></label><button type="button" data-action="stock-search">Search</button></div><div id="stock-search-results" role="listbox">${stockSearchResults()}</div></div>`;}
 function stockSearchResults(){
   if(!stockState.suggestionsOpen)return '';
@@ -16,7 +20,9 @@ function chooseStockResult(index){const item=stockState.results[index];if(!item)
 function stocksPage(id){
   const selected=id?decodeURIComponent(id):'';
   if(selected&&selected!==stockState.selected)queueMicrotask(()=>loadStock(selected));
-  return `${stockSearchPanel()}${holdingsResearchPanel(data?.accounts||[],selected)}${researchWatchlist?.panel(selected)||''}${selected?stockDetail(selected):`<div class="panel stock-empty">${empty('Find a stock or ETF','Search by ticker or company name. Every result includes its exchange so duplicate tickers remain distinct.')}</div>`}`;
+  const currency=stockState.selected===selected?stockState.overview?.security?.currency||'':'';
+  const referencePrice=stockState.selected===selected?stockState.overview?.latest_price?.close??null:null;
+  return `${stockSearchPanel()}${holdingsResearchPanel(data?.accounts||[],selected)}${researchWatchlist?.panel(selected)||''}${selected?`<div id="stock-core">${stockDetail(selected)}</div><div id="stock-corporate-actions">${corporateActionsPanel?.panel(selected)||''}</div><div id="stock-valuation-sandbox">${valuationSandbox?.panel(selected,currency,referencePrice)||''}</div>`:`<div class="panel stock-empty">${empty('Find a stock or ETF','Search by ticker or company name. Every result includes its exchange so duplicate tickers remain distinct.')}</div>`}`;
 }
 function stockDetail(securityId){
   if(stockState.loading||stockState.selected!==securityId)return stockSkeleton();
@@ -54,7 +60,7 @@ async function searchStocks(){
   catch(error){if(error.name!=='AbortError'&&request===stockState.request)stockState.error=error.message;}finally{if(request===stockState.request){stockState.searching=false;renderStockSearch();}}
 }
 async function loadStock(securityId,force=false){
-  if(!force&&stockState.selected===securityId&&stockState.overview)return;stockLoadController?.abort();stockLoadController=new AbortController();const request=++stockState.request;stockState={...stockState,selected:securityId,loading:true,error:'',overview:null,candles:null,financials:null,quarterlyResults:null,quarterlyError:'',financialError:'',request,candleIndex:null};render();const encoded=encodeURIComponent(securityId);
+  if(!force&&stockState.selected===securityId&&stockState.overview)return;const securityChanged=stockState.selected!==securityId;stockLoadController?.abort();stockLoadController=new AbortController();const request=++stockState.request;stockState={...stockState,selected:securityId,loading:true,error:'',overview:null,candles:null,financials:null,quarterlyResults:null,quarterlyError:'',financialError:'',request,candleIndex:null};render();if(securityChanged){valuationSandbox?.activate(securityId);corporateActionsPanel?.load(securityId);}const encoded=encodeURIComponent(securityId);
   try{const [overview,candles,annual,quarterly]=await Promise.all([api(`/stocks/${encoded}/overview`,{signal:stockLoadController.signal}),api(`/stocks/${encoded}/candles?range=${stockState.range}&interval=1d`,{signal:stockLoadController.signal}),api(`/stocks/${encoded}/financials?years=5`,{signal:stockLoadController.signal}).then(data=>({data}),error=>({error:error.message})),api(`/stocks/${encoded}/results/quarterly?quarters=8`,{signal:stockLoadController.signal}).then(data=>({data}),error=>({error:error.message}))]);if(request!==stockState.request)return;Object.assign(stockState,{overview,candles,financials:annual.data,financialError:annual.error||'',quarterlyResults:quarterly.data,quarterlyError:quarterly.error||'',loading:false});}
   catch(error){if(error.name!=='AbortError'&&request===stockState.request)Object.assign(stockState,{error:error.message,loading:false});}finally{if(request===stockState.request)render();}
 }

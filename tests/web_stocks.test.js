@@ -2,7 +2,7 @@ const assert = require('assert');
 const fs = require('fs');
 const vm = require('vm');
 
-const context = vm.createContext({console, URLSearchParams, AbortController, queueMicrotask: () => {}});
+const context = vm.createContext({console, URLSearchParams, AbortController, clearTimeout: () => {}, queueMicrotask: () => {}});
 const sharedSource = fs.readFileSync('web/app.js', 'utf8').split("document.addEventListener('click'")[0];
 vm.runInContext(fs.readFileSync('web/features/stocks/stocks.js', 'utf8'), context);
 vm.runInContext(sharedSource, context);
@@ -37,6 +37,16 @@ const compactStockCss=stockCss.replace(/\s/g,'');
 assert(compactStockCss.includes('width:260px;max-width:calc(100%-20px)'));
 assert(compactStockCss.includes('font-size:16px'));
 assert(compactStockCss.includes('width:calc(100vw-80px);max-width:280px'));
+
+vm.runInContext(`corporateActionsPanel={panel:()=>'<aside>Independent events and dividend panels</aside>',load:()=>Promise.resolve()};
+valuationSandbox={panel:()=>'<aside>Independent valuation sandbox</aside>',activate:()=>{}};
+stockState={...stockState,selected:'NASDAQ:FAIL',loading:false,error:'Core quote unavailable'}`,context);
+const isolatedStockPage=vm.runInContext(`stocksPage('NASDAQ%3AFAIL')`,context);
+assert(isolatedStockPage.includes('Core quote unavailable'));
+assert(isolatedStockPage.includes('Independent events and dividend panels'));
+assert(isolatedStockPage.includes('Independent valuation sandbox'));
+vm.runInContext('resetStockResearch()',context);
+assert.equal(vm.runInContext('stockState.selected',context),'','logout resets the selected security before another user signs in');
 
 // Responsive coordinate mapping snaps to actual array entries, not calendar interpolation.
 assert.equal(vm.runInContext('nearestCandleIndex(100,100,600,3)', context), 0);

@@ -50,6 +50,21 @@ class TimeValue(BaseModel):
         return self
 
 
+class StockValuation(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    method: Literal["pe", "dcf"]
+    currency: str = Field(min_length=3, max_length=3)
+    eps: str | int | float | None = None
+    multiples: list[str | int | float] | None = Field(default=None, max_length=12)
+    free_cash_flow_per_share: str | int | float | None = None
+    annual_growth_percent: str | int | float | None = None
+    discount_rate_percent: str | int | float | None = None
+    terminal_growth_percent: str | int | float | None = None
+    years: int | None = None
+    reference_price: str | int | float | None = None
+
+
 class Command(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 

@@ -19,6 +19,9 @@ async function api(path, options={}) {
 }
 function showLogin(message=''){
   researchWatchlist?.invalidate();
+  corporateActionsPanel?.invalidate();
+  valuationSandbox?.invalidate();
+  resetStockResearch();
   brokerageHistoryRefresh?.invalidate();
   data=null;me=null;revision=-1;dataDate='';bankCashflow=null;recurringSchedules=null;recurringSchedulesLoading=false;recurringSchedulesError='';recurringSchedulesRequest++;
   $('#shell').hidden=true;$('#login').hidden=false;$('#content').replaceChildren();$('#notice').replaceChildren();
@@ -38,14 +41,25 @@ function empty(title, text){return `<div class="empty"><strong>${title}</strong>
 function accountName(id){ return data.accounts.find(a=>a.id===id)?.name || id; }
 function creditAccountName(id){ return data.credit_accounts?.find(a=>a.id===id)?.name || id; }
 async function initializeFeatures(){
-  const [{createHoldingsResearchPanel},{createFinancialTrendPanel},{createResearchWatchlist}]=await Promise.all([
+  const [{createHoldingsResearchPanel},{createFinancialTrendPanel},{createResearchWatchlist},{createCorporateActionsPanel},{createValuationSandbox}]=await Promise.all([
     import('./features/stocks/holdings-research.js'),
     import('./features/stocks/financial-trends.js'),
     import('./features/stocks/research-watchlist.js'),
+    import('./features/stocks/corporate-actions.js'),
+    import('./features/stocks/valuation-sandbox.js'),
   ]);
   holdingsResearchPanel=createHoldingsResearchPanel({esc});
   financialTrendPanel=createFinancialTrendPanel({esc});
   researchWatchlist=createResearchWatchlist({api,esc,onUpdate:()=>{if(route().page==='stocks')render();}});
+  corporateActionsPanel=createCorporateActionsPanel({api,esc,onUpdate:(securityId,html)=>{
+    if(route().page!=='stocks'||stockState.selected!==securityId||decodeURIComponent(route().id||'')!==securityId)return;
+    const target=$('#stock-corporate-actions');if(target)target.innerHTML=html;
+  }});
+  valuationSandbox=createValuationSandbox({api,esc,documentRef:document,onUpdate:(securityId,html)=>{
+    if(route().page!=='stocks'||stockState.selected!==securityId||decodeURIComponent(route().id||'')!==securityId)return;
+    const target=$('#stock-valuation-sandbox');if(target)target.innerHTML=html;
+  }});
+  valuationSandbox.attach();
   const {createQuarterlyResultsPanel}=await import('./features/stocks/quarterly-results.js');
   quarterlyResultsPanel=createQuarterlyResultsPanel({esc});
   const [{createDashboardPages},{createLoanForms},{createBrokerageChartController}]=await Promise.all([
@@ -75,7 +89,10 @@ function render(){
   if(!data||!dashboardPages||!loanForms)return;
   dashboardPages.setData(data);loanForms.setData(data);
   const {page,id}=route();
-  const focusedSearch=document.activeElement?.id==='stock-search-input',selection=focusedSearch?{start:document.activeElement.selectionStart,end:document.activeElement.selectionEnd}:null;
+  const focusedSearch=document.activeElement?.id==='stock-search-input',searchSelection=focusedSearch?{start:document.activeElement.selectionStart,end:document.activeElement.selectionEnd}:null;
+  const activeValuationInput=document.activeElement?.closest?.('.stock-valuation-form')?document.activeElement:null;
+  const activeValuationForm=activeValuationInput?.closest('.stock-valuation-form');
+  const valuationFocus=activeValuationForm?{security:activeValuationForm.dataset.security,method:activeValuationForm.dataset.method,assumption:activeValuationInput.dataset.assumption,start:activeValuationInput.selectionStart,end:activeValuationInput.selectionEnd}:null;
   const titles={overview:['THE BIG PICTURE','Your financial overview','Every account. One place.'],stocks:['MARKET RESEARCH','Stocks','Completed-session prices and reported fundamentals.'],'credit-cards':['YOUR CREDIT CARDS','Credit-card dashboard','Balances, purchases, refunds, and payments in SGD.'],accounts:['YOUR ACCOUNTS','A home for every account','Balances and holdings, in their original currencies.'],loans:['YOUR COMMITMENTS','Loans & repayments','See what is outstanding and what comes next.'],calculator:['PLAN AHEAD','Present & Future Value','Explore contributions, withdrawals, returns, and time.'],'data-management':['YOUR DATA','Backup and restore','Export or replace all application data.'],activity:['YOUR FINANCIAL RECORD','Transaction history','Search, review, correct, or cancel existing transactions. New transactions are still recorded in Telegram.']};
   titles.recurring=['SCHEDULED LEDGER ENTRIES','Recurring transactions','Review ongoing monthly and annual ledger schedules.'];
   const t=titles[page] || titles.overview;
@@ -90,7 +107,8 @@ function render(){
   if(page==='recurring'&&recurringSchedules===null&&!recurringSchedulesLoading)loadRecurringSchedules();
   if(page==='activity'){if(bankCashflow)renderBankCashflow();else loadBankCashflow(bankCashflowYear);}
   brokerageChartController.drawAll();
-  if(focusedSearch){const input=$('#stock-search-input');input?.focus({preventScroll:true});if(input&&selection)input.setSelectionRange(selection.start,selection.end);}
+  if(focusedSearch){const input=$('#stock-search-input');input?.focus({preventScroll:true});if(input&&searchSelection)input.setSelectionRange(searchSelection.start,searchSelection.end);}
+  if(valuationFocus){const form=Array.from(document.querySelectorAll('.stock-valuation-form')).find(item=>item.dataset.security===valuationFocus.security&&item.dataset.method===valuationFocus.method);const input=form?.querySelector(`[data-assumption="${CSS.escape(valuationFocus.assumption)}"]`);input?.focus({preventScroll:true});if(input&&valuationFocus.start!=null&&valuationFocus.end!=null)input.setSelectionRange(valuationFocus.start,valuationFocus.end);}
 }
 async function loadRecurringSchedules(){
   const request=++recurringSchedulesRequest;
@@ -103,6 +121,8 @@ async function load(){
   brokerageHistoryRefresh?.invalidate();
   data=await api('/dashboard'); revision=data.revision; dataDate=data.as_of;bankCashflow=null;recurringSchedules=null;recurringSchedulesRequest++;
   brokerageHistoryRefresh?.noteDashboardLoaded(data);
+  const current=route();
+  if(current.page==='stocks'&&stockState.selected&&decodeURIComponent(current.id||'')===stockState.selected)corporateActionsPanel?.retry(stockState.selected,'holdingsDividends');
   $('#login').hidden=true; $('#shell').hidden=false;
   $('#connection').textContent='● Connected · updated '+new Date().toLocaleTimeString('en-SG',{hour:'2-digit',minute:'2-digit'});
   render();
@@ -173,6 +193,9 @@ document.addEventListener('click',e=>{
   if(brokerageChartController?.handleAction(b))return;
   const action=b.dataset.action;
   if(action==='stock-search')searchStocks();
+  if(action==='stock-events-retry')corporateActionsPanel?.retry(b.dataset.id,'events');
+  if(action==='stock-dividends-retry')corporateActionsPanel?.retry(b.dataset.id,'dividends');
+  if(action==='stock-holdings-dividends-retry')corporateActionsPanel?.retry(b.dataset.id,'holdingsDividends');
   if(action==='backup-export')exportBackup();
   if(action==='backup-sample')downloadBackupTemplate();
   if(action==='history-edit')openTransactionEdit(b.dataset.id);

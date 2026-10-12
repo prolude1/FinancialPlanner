@@ -235,11 +235,111 @@ class YahooStockResearchProvider:
         return {"security_id": security["security_id"], "period_type": period_type,
                 "currency": currency, **row, "source": SOURCE}
 
+    @staticmethod
+    def _event_date(value):
+        if value is None:
+            return None
+        try:
+            if hasattr(value, "to_pydatetime"):
+                value = value.to_pydatetime()
+            if hasattr(value, "date") and not isinstance(value, str):
+                value = value.date()
+            return value.isoformat()[:10]
+        except (ValueError, TypeError, AttributeError):
+            return None
+
+    def events(self, exchange, symbol):
+        security = self.identity(exchange, symbol)
+        ticker = self._ticker(exchange, symbol)
+        events = []
+        try:
+            calendar = ticker.calendar
+            if hasattr(calendar, "to_dict"):
+                calendar = calendar.to_dict()
+            if isinstance(calendar, dict):
+                event_fields = [("Ex-Dividend Date", "ex_dividend"), ("Dividend Date", "dividend_date")]
+                if security.get("asset_class") != "etf":
+                    event_fields.insert(0, ("Earnings Date", "earnings"))
+                for key, kind in event_fields:
+                    value = calendar.get(key)
+                    values = value if isinstance(value, (list, tuple)) else [value]
+                    dates = [self._event_date(item) for item in values]
+                    dates = [item for item in dates if item]
+                    if dates:
+                        event = {"kind": kind, "dates": sorted(set(dates)), "date_source": "provider",
+                                 "date_status": "provider_supplied_unverified"}
+                        event["provider_label"] = key
+                        if kind == "earnings" and len(dates) > 1:
+                            event["date_range"] = {"start": min(dates), "end": max(dates)}
+                        events.append(event)
+            if security.get("asset_class") != "etf":
+                try:
+                    frame = ticker.get_earnings_dates(limit=12)
+                    if frame is not None:
+                        dates = sorted(set(filter(None, (self._event_date(stamp) for stamp in frame.index))))
+                        existing = {date for event in events if event["kind"] == "earnings" for date in event["dates"]}
+                        for date in dates:
+                            if date not in existing:
+                                events.append({"kind": "earnings", "dates": [date], "date_source": "provider",
+                                               "date_status": "provider_supplied_unverified"})
+                except Exception:
+                    # Calendar dates remain useful when the optional earnings table is unavailable.
+                    pass
+        except StockProviderError:
+            raise
+        except Exception as exc:
+            raise StockProviderError("provider_unavailable", "Corporate events are temporarily unavailable") from exc
+        return {"security_id": security["security_id"], "currency": security["currency"],
+                "events": sorted(events, key=lambda event: (event["dates"][0], event["kind"])),
+                "source": SOURCE}
+
+    def dividends(self, exchange, symbol):
+        security = self.identity(exchange, symbol)
+        ticker = self._ticker(exchange, symbol)
+        try:
+            series = ticker.get_dividends(period="5y")
+            splits = ticker.splits
+            provider_currency = (ticker.history_metadata or {}).get("currency")
+        except Exception as exc:
+            raise StockProviderError("provider_unavailable", "Dividend history is temporarily unavailable") from exc
+        scale = Decimal("0.01") if provider_currency == "GBp" else Decimal(1)
+        currency = self.prices.normalize_currency(provider_currency) if provider_currency else None
+        denomination_verified = currency is not None
+        split_dates = []
+        split_history_complete = True
+        try:
+            for stamp, ratio in splits.items():
+                if Decimal(str(ratio)) == 0:
+                    continue
+                split_date = self._event_date(stamp)
+                if split_date is None:
+                    split_history_complete = False
+                else:
+                    split_dates.append(split_date)
+        except (AttributeError, TypeError, ValueError):
+            split_dates = []
+            split_history_complete = False
+        rows = []
+        for stamp, amount in series.items():
+            ex_date = self._event_date(stamp)
+            raw_amount = _number(amount)
+            value = _number(Decimal(raw_amount) * scale) if raw_amount is not None else None
+            if not ex_date or value is None or Decimal(value) <= 0:
+                continue
+            rows.append({"ex_date": ex_date, "amount_per_share": value, "currency": currency,
+                         "denomination_status": "verified" if denomination_verified else "unverified",
+                         "split_adjustment_status": "unsupported" if not denomination_verified or not split_history_complete or
+                         any(date and date >= ex_date for date in split_dates) else "verified_no_later_split"})
+        rows.sort(key=lambda row: row["ex_date"], reverse=True)
+        return {"security_id": security["security_id"], "period_years": 5, "currency": currency,
+                "date_semantics": "ex_date", "dividends": rows, "source": SOURCE}
+
 
 class StockService:
     TTLS = {"search": timedelta(hours=24), "overview": timedelta(minutes=30),
             "candles": timedelta(hours=6), "financials": timedelta(hours=24),
-            "earnings": timedelta(hours=6), "quarterly": timedelta(hours=24)}
+            "earnings": timedelta(hours=6), "quarterly": timedelta(hours=24),
+            "events": timedelta(hours=6), "dividends": timedelta(hours=24)}
 
     def __init__(self, provider=None, retries=2):
         self.provider = provider or YahooStockResearchProvider()
@@ -315,6 +415,14 @@ class StockService:
         exchange, symbol = parse_security_id(security_id)
         return self._load(security_id, f"quarterly:{quarters}",
                           lambda: self.provider.quarterly_results(exchange, symbol, quarters))
+
+    def events(self, security_id):
+        exchange, symbol = parse_security_id(security_id)
+        return self._load(security_id, "events", lambda: self.provider.events(exchange, symbol))
+
+    def dividends(self, security_id):
+        exchange, symbol = parse_security_id(security_id)
+        return self._load(security_id, "dividends", lambda: self.provider.dividends(exchange, symbol))
 
 
 service = StockService()

@@ -139,3 +139,32 @@ Expand **Exact trend values** for the underlying figures. Values use the reporti
 currency. Missing values remain unavailable, and missing periods break the line.
 ETFs do not have corporate quarterly results. Chart dates are fiscal period ends;
 use the quarterly timeline below for year-over-year comparisons and data coverage.
+
+### Events, dividends and valuation scenarios
+
+The stock research screen separates company event dates from fiscal period ends.
+Provider earnings dates may be estimates or a date range. An ex-dividend date is
+a different event from the payment date; unavailable dates remain unavailable.
+Dividend history shows the provider's per-share distribution records.
+
+Estimated holdings income is a gross historical estimate based on recorded
+holdings before each ex-dividend date. It is not proof of a broker payment. The
+estimate excludes tax, withholding, fees, foreign exchange and reinvestment,
+and never creates a transaction. Incomplete holdings history, trades on the
+ex-date and uncertain split adjustments may prevent a reliable estimate; review
+the reasons shown for excluded records. Compare against broker statements.
+
+The valuation sandbox accepts your assumptions for two methods:
+
+- **P/E:** enter annual earnings per share and comparison P/E multiples in one
+  currency. Each scenario is EPS multiplied by that scenario's multiple.
+- **Discounted cash flow:** enter annual equity cash flow per share, growth,
+  forecast years, discount rate and terminal growth. The model discounts future
+  cash flows and a terminal value. The discount rate must exceed terminal growth.
+  Cash flow per share should reflect cash available to shareholders; company
+  operating free cash flow alone may need debt and share-count adjustments.
+
+Inputs are manual assumptions, not retrieved forecasts. A reference share price
+is optional and must use the same currency and denomination. Scenario results
+show what the inputs imply; they do not establish whether a stock is fairly
+priced. Nonpositive earnings or cash flow may make these models unsuitable.

@@ -294,3 +294,27 @@
 .trend-line {fill:none;stroke:var(--green);stroke-width:2;}
 .trend-point {fill:var(--green);}
 @media(max-width:650px){.financial-trend-grid {grid-template-columns:1fr;}}
+
+.stock-corporate-actions,.stock-valuation-sandbox {display:grid;gap:14px;min-width:0;}
+.stock-corporate-panel h2,.valuation-method h3 {margin:0;}
+.stock-event-list {list-style:none;padding:0;margin:16px 0 0;display:grid;gap:12px;}
+.stock-event-list article {border-left:3px solid var(--green);padding:4px 12px;}
+.stock-event-list h3 {margin:0 0 8px;font-size:16px;}
+.stock-event-list p {margin:6px 0;}
+.stock-event-dates {margin:8px 0;padding-left:20px;}
+.stock-event-status,.stock-estimate-reason,.stock-dividend-account {display:block;margin-top:5px;color:var(--muted);font-size:12px;}
+.stock-dividend-limitations {padding-left:20px;color:var(--muted);font-size:13px;}
+.stock-dividend-table {margin-top:14px;}
+.stock-dividend-table td {vertical-align:top;}
+.valuation-method-grid {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;align-items:start;}
+.valuation-method {min-width:0;padding:18px;}
+.stock-valuation-form {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-top:14px;}
+.stock-valuation-form label {min-width:0;display:grid;gap:6px;color:var(--muted);font-size:13px;}
+.stock-valuation-form input {width:100%;min-width:0;}
+.stock-valuation-form label:first-child,.stock-valuation-form button {grid-column:1/-1;}
+.valuation-results {margin-top:14px;}
+.valuation-results table {min-width:560px;}
+.valuation-results caption {padding:8px;text-align:left;color:var(--muted);}
+.valuation-dcf-results p {overflow-wrap:anywhere;}
+@media(max-width:800px){.valuation-method-grid {grid-template-columns:1fr;}}
+@media(max-width:500px){.stock-valuation-form {grid-template-columns:1fr;}.stock-valuation-form label:first-child,.stock-valuation-form button {grid-column:auto;}}

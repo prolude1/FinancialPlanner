@@ -108,3 +108,46 @@ include zero and support losses. Missing values or omitted periods break lines.
 Dates reflect fiscal period ends, not announcement dates. Annual financials now
 use reporting currency too, with a new cache key to avoid reusing responses
 labelled with the trading currency. The view does not forecast future results.
+
+## Events, distributions and valuation sandbox
+
+The research screen adds selected-security event dates, five-year per-share
+distribution history, historical holdings-income estimates and manual valuation
+scenarios. Shared provider responses are cached independently; user holdings
+estimates use the caller's ledger and must never enter the shared stock cache.
+These features do not create trades or cashflow transactions.
+
+Events use Yahoo's calendar and earnings-date interfaces. Provider calendar ranges
+remain ranges and should not be presented as confirmed announcements. Historical
+statement period ends are not reused as event dates. Dividend records use ex-date
+semantics; payment dates are only shown if explicitly supplied. Provider metadata
+and amount denomination must agree, including normalization of GBp amounts to
+GBP. Missing units and uncertain split adjustments prevent reliable income
+estimation. See the primary [Ticker documentation](https://ranaroussi.github.io/yfinance/reference/api/yfinance.Ticker.html)
+and [dividend history interface](https://ranaroussi.github.io/yfinance/reference/api/yfinance.Ticker.get_dividends.html).
+
+The P/E sandbox evaluates annual EPS against user-chosen multiples. The DCF
+sandbox is an equity cash-flow-per-share model: forecast cashflows grow annually,
+are discounted at the user's rate, and include a discounted Gordon-growth
+terminal value. It is not an enterprise-value model. The terminal-growth rate
+must remain below the positive discount rate. Both methods accept manual
+currency and optional same-currency reference price, validate finite bounded
+inputs, and return explicit assumptions. Forecasts and results are not stored
+as market facts or added to the financial ledger.
+
+API contracts:
+
+| Endpoint | Scope | Cache |
+| --- | --- | --- |
+| `GET /api/stocks/{security_id}/events` | Provider calendar and earnings dates | Shared, six hours |
+| `GET /api/stocks/{security_id}/dividends` | Five-year ex-date distribution history | Shared, 24 hours |
+| `GET /api/stocks/{security_id}/dividends/holdings` | Verified user's historical gross income estimates | No shared cache |
+| `POST /api/stocks/{security_id}/valuation` | Manual P/E or equity DCF calculation | Not persisted |
+
+Income estimates replay active ledger events through the day before each ex-date.
+Accounts with same-day activity are unknown; unaffected accounts may still have
+estimates, labelled as partial when another account is unknown. Missing recorded
+holding history must not be interpreted as verified zero income. Provider and
+ledger splits after the ex-date make historical payout calculations unsupported
+when adjustment semantics cannot be verified. Stale distribution metadata remains
+visible in the user-specific estimate response.
