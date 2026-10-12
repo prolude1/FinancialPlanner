@@ -7,7 +7,7 @@ from contextlib import contextmanager
 from copy import deepcopy
 import os
 from sqlalchemy import (create_engine, MetaData, Table, Column, Integer, BigInteger, JSON,
-                        String, Boolean, DateTime, LargeBinary, select, update, delete, text, func)
+                        String, Boolean, DateTime, LargeBinary, select, update, delete, text, inspect, func)
 from datetime import datetime, timezone
 import hashlib
 import secrets
@@ -135,8 +135,63 @@ MAX_PENDING_CONFIRMATION_BYTES = 128 * 1024 * 1024
 
 
 def migrate():
-    from .migration_runner import MigrationRunner
-    return MigrationRunner(engine).upgrade()
+    metadata.create_all(engine)
+    with engine.begin() as c:
+        # create_all does not add columns to existing tables.
+        for table_name in ("portfolio_deposit_history", "tenant_portfolio_deposit_history"):
+            columns = {row["name"] for row in inspect(c).get_columns(table_name)}
+            if "missing_fx_count" not in columns:
+                c.exec_driver_sql(
+                    f"ALTER TABLE {table_name} ADD COLUMN missing_fx_count INTEGER NOT NULL DEFAULT 0")
+            if "stale_fx_count" not in columns:
+                c.exec_driver_sql(
+                    f"ALTER TABLE {table_name} ADD COLUMN stale_fx_count INTEGER NOT NULL DEFAULT 0")
+            if "stale_fx_last_success_at" not in columns:
+                c.exec_driver_sql(
+                    f"ALTER TABLE {table_name} ADD COLUMN stale_fx_last_success_at VARCHAR(32)")
+        for table_name in ("portfolio_history", "tenant_portfolio_history"):
+            external_flow = next(column for column in inspect(c).get_columns(table_name)
+                                 if column["name"] == "external_flow_sgd")
+            if not external_flow["nullable"]:
+                if c.dialect.name == "postgresql":
+                    c.exec_driver_sql(
+                        f"ALTER TABLE {table_name} ALTER COLUMN external_flow_sgd DROP NOT NULL")
+                elif c.dialect.name == "sqlite":
+                    # SQLite lacks ALTER COLUMN DROP NOT NULL. Rebuild the small
+                    # projection table while preserving every persisted row.
+                    suffix = "_nullable_migration"
+                    replacement = table_name + suffix
+                    c.exec_driver_sql(f"DROP TABLE IF EXISTS {replacement}")
+                    c.exec_driver_sql(f"""CREATE TABLE {replacement} (
+                        account VARCHAR(10) NOT NULL,
+                        date VARCHAR(10) NOT NULL,
+                        value_sgd VARCHAR(64) NOT NULL,
+                        gross_change_sgd VARCHAR(64),
+                        adjusted_change_sgd VARCHAR(64),
+                        external_flow_sgd VARCHAR(64),
+                        updated_at DATETIME NOT NULL,
+                        {"principal VARCHAR(64) NOT NULL, " if table_name.startswith("tenant_") else ""}
+                        PRIMARY KEY ({"principal, " if table_name.startswith("tenant_") else ""}account, date))""")
+                    columns = "principal, account, date, " if table_name.startswith("tenant_") else "account, date, "
+                    columns += "value_sgd, gross_change_sgd, adjusted_change_sgd, external_flow_sgd, updated_at"
+                    c.exec_driver_sql(f"INSERT INTO {replacement} ({columns}) SELECT {columns} FROM {table_name}")
+                    c.exec_driver_sql(f"DROP TABLE {table_name}")
+                    c.exec_driver_sql(f"ALTER TABLE {replacement} RENAME TO {table_name}")
+        if c.execute(select(state.c.id)).first() is None:
+            data = empty()
+            bot = data.pop("bot", {"offset": 0, "session": None})
+            c.execute(state.insert().values(id=1, schema_version=1, data=data))
+            c.execute(bot_runtime.insert().values(id=1, data=bot))
+        elif c.execute(select(bot_runtime.c.id)).first() is None:
+            # One-way additive migration: preserve existing global Telegram state
+            # while removing it from the financial ledger row.
+            row = c.execute(select(state).where(state.c.id == 1)).mappings().one()
+            data = deepcopy(row["data"])
+            bot = data.pop("bot", {"offset": 0, "session": None})
+            c.execute(update(state).where(state.c.id == 1).values(data=data))
+            c.execute(bot_runtime.insert().values(id=1, data=bot))
+        if c.execute(select(legacy_claim.c.id)).first() is None:
+            c.execute(legacy_claim.insert().values(id=1, claimed_by=None, claimed_at=None))
 
 
 def lock_application(c):
@@ -641,5 +696,4 @@ def redeem_legacy_claim(principal, token, now=None):
 
 
 if __name__ == "__main__":
-    from .migration_runner import main
-    main()
+    migrate()

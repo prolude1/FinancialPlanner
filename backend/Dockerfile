@@ -33,8 +33,6 @@ RUN useradd --create-home planner \
     && chown planner:planner /data
 
 COPY backend/app ./app
-COPY backend/alembic.ini ./alembic.ini
-COPY backend/migrations ./migrations
 COPY scripts/issue_legacy_claim.py ./scripts/issue_legacy_claim.py
 COPY tests ./tests
 

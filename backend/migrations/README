@@ -1,2 +1,0 @@
-Alembic revisions in this directory are immutable numbered schema history.
-Do not import app.core.store.metadata or app.core.domain.empty from a revision.

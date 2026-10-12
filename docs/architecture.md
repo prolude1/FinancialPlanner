@@ -16,7 +16,7 @@ flowchart LR
     Bot -->|conversation state| DB
     Worker[worker: daily prices + FX] --> Providers[Free providers]
     Worker --> DB
-    Migrate[migrate: versioned schema upgrades] --> DB
+    Migrate[migrate: schema initialization] --> DB
 ```
 
 | Service | Image/entry point | Responsibility |
@@ -26,7 +26,7 @@ flowchart LR
 | `api` | `financial-planner-backend:local`, `app.api_server.main:app` | Owner sessions, validation, atomic commands, dashboard views |
 | `bot` | Same backend image, `python -m app.telegram_bot` | Owner checks, guided prompts, confirmations, polling, durable replies |
 | `worker` | Same backend image, `python -m app.core.worker` | Exchange-session checks, daily OHLC prices, daily reference FX |
-| `migrate` | Same backend image, `python -m app.core.store` | Apply numbered Alembic schema revisions; exits on success |
+| `migrate` | Same backend image, `python -m app.core.store` | Idempotent version-1 schema initialization; exits on success |
 | `db` | `postgres:17.4-alpine` | Persistent application state |
 
 Web port 8080 and Keycloak port 8081 are published only on `127.0.0.1`. All backend/database traffic stays on the Compose network. Telegram uses outbound polling; no public webhook or remote web access is configured.
@@ -45,17 +45,6 @@ Compose waits for PostgreSQL health, runs migration successfully, then starts th
 ## Storage and transaction model
 
 Each financial principal has one PostgreSQL `tenant_ledger` row with a `schema_version` and JSON aggregate. A write locks the row, validates a copied state, and commits the complete aggregate atomically. The original `planner_state(id=1)` remains an unassigned legacy ledger for the old local-password/single-owner bot integration only until the owner explicitly claims it. No principal is inferred from the old row. `tenant_portfolio_history` is keyed by principal, account, and date. The instrument catalog and quote cache remain shared read-only market infrastructure.
-
-Physical database structure is tracked separately by Alembic. Numbered, frozen
-revision files describe table creation, compatibility upgrades, and one-time
-data migrations; future model changes do not rewrite those historical steps.
-`store.migrate()` delegates to the migration runner, preserving the existing
-Compose entry point and test setup. Upgrades serialize through a database lock,
-and a successful revision is recorded alongside its committed changes. Existing
-unversioned databases are adopted through compatibility checks and upgrades,
-preserving ledger records and global Telegram state. The ledger JSON
-`schema_version` and workbook format remain version 1. See the operational
-migration procedure in [operations](operations.md).
 
 ### Keycloak identity and Telegram link foundation
 
