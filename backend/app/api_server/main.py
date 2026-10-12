@@ -602,6 +602,13 @@ def stock_latest_earnings(security_id: str, request: Request):
     return stock_service.latest_earnings(security_id)
 
 
+@app.get("/api/stocks/{security_id}/results/quarterly")
+def stock_quarterly_results(security_id: str, request: Request,
+                            quarters: int = Query(default=8, ge=1, le=8)):
+    identity(request)
+    return stock_service.quarterly_results(security_id, quarters)
+
+
 @app.post("/api/commands/{command}")
 async def mutate(command: str, request: Request):
     principal, actor = ledger_access(request)

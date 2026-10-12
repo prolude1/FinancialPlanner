@@ -59,3 +59,24 @@ Documentation: https://www.alphavantage.co/support/
 - Responses are cached for 30 minutes (overview), six hours (candles and latest
   earnings), or 24 hours (search and annual financials). Expired cache data is
   returned with `stale: true` only after a retryable provider failure.
+
+## Quarterly results timeline
+
+The Stocks page requests up to eight quarterly periods from
+`GET /api/stocks/{security_id}/results/quarterly?quarters=8` (authenticated,
+quarters 1–8). A separate `QuarterlyResultsTimeline` class matches comparable
+period ends 350–380 days earlier to accommodate 52/53-week calendars. Revenue,
+net income and explicit free cash flow are displayed with YoY percentages only
+when both values exist and the prior value is positive. Comparisons fetch up to
+four additional older periods when the provider supplies them. Missing quarters
+are not filled or substituted with annual figures.
+
+The timeline uses `financialCurrency`, independently of the security's quote
+currency; an absent reporting currency is explicitly shown as unavailable.
+Period ends are not filing or announcement dates. The provider adapter currently
+has no reliable per-statement report dates, so these remain null. ETFs receive
+an explicit unsupported response. Statements can contain restatements and
+limited quarterly history: eight quarters is a request, not guaranteed coverage.
+Results are cached for 24 hours with the existing stale-cache fallback. Timeline
+request failures are displayed within the timeline without hiding price data.
+The renderer lives in `web/features/stocks/quarterly-results.js` as an ES module.

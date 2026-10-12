@@ -37,6 +37,8 @@ function empty(title, text){return `<div class="empty"><strong>${title}</strong>
 function accountName(id){ return data.accounts.find(a=>a.id===id)?.name || id; }
 function creditAccountName(id){ return data.credit_accounts?.find(a=>a.id===id)?.name || id; }
 async function initializeFeatures(){
+  const {createQuarterlyResultsPanel}=await import('./features/stocks/quarterly-results.js');
+  quarterlyResultsPanel=createQuarterlyResultsPanel({esc});
   const [{createDashboardPages},{createLoanForms},{createBrokerageChartController}]=await Promise.all([
     import('./features/dashboard/dashboard-pages.js'),
     import('./features/loans/loan-forms.js'),

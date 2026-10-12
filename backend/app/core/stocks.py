@@ -8,6 +8,7 @@ import time
 
 from . import store
 from .providers import YahooStockPriceProvider, completed_session
+from .quarterly_results import QuarterlyResultsTimeline
 
 
 EXCHANGE_TIMEZONES = {"NASDAQ": "America/New_York", "NYSE": "America/New_York",
@@ -165,17 +166,19 @@ class YahooStockResearchProvider:
 
     @staticmethod
     def _statement_value(frame, column, names):
+        if column not in frame.columns:
+            return None
         for name in names:
             if name in frame.index:
                 return _number(frame.at[name, column])
         return None
 
-    def _financial_rows(self, exchange, symbol, frequency, limit):
+    def _financial_rows(self, exchange, symbol, frequency, limit, reporting_currency=False):
         ticker = self._ticker(exchange, symbol)
         try:
             income = ticker.get_income_stmt(freq=frequency)
             cash = ticker.get_cash_flow(freq=frequency)
-            metadata = ticker.history_metadata
+            metadata = ticker.get_info() if reporting_currency else ticker.history_metadata
         except Exception as exc:
             raise StockProviderError("provider_unavailable", "Financial statements are temporarily unavailable") from exc
         columns = sorted(set(income.columns).union(cash.columns), reverse=True)[:limit]
@@ -189,8 +192,20 @@ class YahooStockResearchProvider:
             rows.append({"period_end": str(column.date()), "report_date": None,
                          "revenue": revenue, "free_cash_flow": fcf,
                          "profit_after_tax": profit, "ebitda": ebitda, "ebita": ebita})
-        currency = self.prices.normalize_currency(metadata.get("currency"))
+        currency = metadata.get("financialCurrency") if reporting_currency else self.prices.normalize_currency(metadata.get("currency"))
         return rows, currency
+
+    def quarterly_results(self, exchange, symbol, quarters):
+        security = self.identity(exchange, symbol)
+        supported = security.get("asset_class") != "etf"
+        rows, currency = self._financial_rows(exchange, symbol, "quarterly", quarters + 4,
+                                              reporting_currency=True) if supported else ([], None)
+        results = QuarterlyResultsTimeline().build(rows, quarters)
+        return {"security_id": security["security_id"], "currency": currency,
+                "supported": supported, "quarters": results,
+                "coverage": {"requested_quarters": quarters, "returned_quarters": len(results),
+                             "complete": len(results) == quarters},
+                "source": SOURCE}
 
     def financials(self, exchange, symbol, years):
         security = self.identity(exchange, symbol)
@@ -224,7 +239,7 @@ class YahooStockResearchProvider:
 class StockService:
     TTLS = {"search": timedelta(hours=24), "overview": timedelta(minutes=30),
             "candles": timedelta(hours=6), "financials": timedelta(hours=24),
-            "earnings": timedelta(hours=6)}
+            "earnings": timedelta(hours=6), "quarterly": timedelta(hours=24)}
 
     def __init__(self, provider=None, retries=2):
         self.provider = provider or YahooStockResearchProvider()
@@ -295,6 +310,11 @@ class StockService:
     def latest_earnings(self, security_id):
         exchange, symbol = parse_security_id(security_id)
         return self._load(security_id, "earnings", lambda: self.provider.latest_earnings(exchange, symbol))
+
+    def quarterly_results(self, security_id, quarters=8):
+        exchange, symbol = parse_security_id(security_id)
+        return self._load(security_id, f"quarterly:{quarters}",
+                          lambda: self.provider.quarterly_results(exchange, symbol, quarters))
 
 
 service = StockService()

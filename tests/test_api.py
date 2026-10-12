@@ -1037,3 +1037,16 @@ def test_recurring_schedule_api_is_tenant_and_link_scoped(client, monkeypatch):
                             json=bot_body)
     assert bot_retry.status_code == 201
     assert bot_retry.json()["schedule"]["id"] == bot_created.json()["schedule"]["id"]
+
+
+def test_quarterly_results_endpoint_authentication_and_limits(client, monkeypatch):
+    fake = Mock()
+    fake.quarterly_results.return_value = {"quarters": [], "coverage": {"complete": False}}
+    monkeypatch.setattr(api, "stock_service", fake)
+    path = "/api/stocks/NASDAQ:AAPL/results/quarterly"
+    assert client.get(path).status_code == 401
+    headers = {"Authorization": "Bearer test-bot-secret"}
+    response = client.get(path, headers=headers)
+    assert response.status_code == 200 and response.json()["quarters"] == []
+    fake.quarterly_results.assert_called_once_with("NASDAQ:AAPL", 8)
+    assert client.get(path + "?quarters=9", headers=headers).status_code == 422
