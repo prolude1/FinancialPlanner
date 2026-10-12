@@ -131,6 +131,56 @@ For recovery, stop writers (`docker compose stop api bot worker web`), take a fr
 
 An exact dump/restore comparison was verified in the isolated test stack. See [validation](validation.md).
 
+## Versioned database upgrades
+
+Database schema changes use numbered Alembic revisions. The Compose `migrate`
+service applies pending revisions before the API starts. Database revision
+tracking is separate from the ledger and workbook format versions, which remain
+at version 1.
+
+Migration definitions live in `backend/migrations/versions/`, configured by
+`backend/alembic.ini`. With PostgreSQL running, inspect the new image before
+applying changes:
+
+```sh
+docker compose run --rm --no-deps migrate python -m app.core.store status
+docker compose run --rm --no-deps migrate python -m app.core.store current
+docker compose run --rm --no-deps migrate python -m app.core.store heads
+docker compose run --rm --no-deps migrate python -m app.core.store history
+```
+
+These inspection commands do not initialize or upgrade the database. The
+existing `python -m app.core.store` command applies pending upgrades; the normal
+Compose migration service continues to use it.
+
+Before an upgrade, review the pending revision files, take a private database
+dump, and verify that it restores into a separate database. Test the new image
+against that restored copy, including tenant isolation, imports, and affected
+financial calculations. Keep the verified dump and previous application image
+until deployment checks pass.
+
+Existing databases without migration tracking must pass the compatibility
+upgrade path. Do not manually stamp an unknown database at the latest revision
+to bypass that check. Applied revision files are immutable; add a new numbered
+revision for later changes. Review generated migration code before use,
+especially column deletion, backfills, defaults, and SQLite table rebuilds.
+
+For the next change, create a revision with the next numeric prefix and point
+`down_revision` at the current head. Keep a single linear revision chain. Each
+revision must contain its own schema definitions and data transformations,
+without importing current application metadata or domain initialization
+helpers. Test both a fresh database and an upgrade from its predecessor, plus
+failure rollback and repeated execution. Application table declarations must
+still match the resulting schema.
+
+If migration fails, stop the deployment and inspect its revision status before
+retrying. A newer or unknown database revision requires matching application
+code rather than a forced downgrade. Recovery from a destructive schema or data
+change uses the verified pre-upgrade backup and the corresponding application
+image, following the restore procedure above. Keep the original database until
+the recovered stack is verified. See the [Alembic tutorial](https://alembic.sqlalchemy.org/en/latest/tutorial.html)
+for revision authoring concepts.
+
 ## Container-only testing
 
 ```sh

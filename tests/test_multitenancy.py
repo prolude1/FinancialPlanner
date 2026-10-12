@@ -53,7 +53,8 @@ def test_additive_migration_moves_legacy_bot_state_to_singleton_runtime(tmp_path
     from sqlalchemy import create_engine
     engine = create_engine("sqlite:///" + str(tmp_path / "old-schema.db"))
     monkeypatch.setattr(store, "engine", engine)
-    store.state.create(engine)
+    for table in (store.state, store.instruments, store.portfolio_history, store.stock_cache):
+        table.create(engine)
     old = empty()
     old["bot"] = {"offset": 42, "session": {"command": "deposit"},
         "pending_reply": "resume", "pending_markup": None}
