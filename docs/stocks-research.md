@@ -80,3 +80,31 @@ limited quarterly history: eight quarters is a request, not guaranteed coverage.
 Results are cached for 24 hours with the existing stale-cache fallback. Timeline
 request failures are displayed within the timeline without hiding price data.
 The renderer lives in `web/features/stocks/quarterly-results.js` as an ES module.
+
+## Holdings research, watchlist and financial trends
+
+The Stocks page lists current positive-quantity holdings from the authenticated
+portfolio snapshot, grouped by exchange and ticker across brokerage accounts.
+It does not fetch financial statements for every holding in the background;
+opening a security loads its research data through the existing cached queries.
+ETFs can appear in the holdings list and watchlist, while corporate quarterly
+results remain unavailable for ETFs.
+
+A separate research watchlist supports candidates without creating ledger trades.
+`GET /api/research/watchlist`, `PUT /api/research/watchlist/{security_id}` and
+`DELETE /api/research/watchlist/{security_id}` derive ownership from the verified
+caller. Legacy access retains existing claim and CSRF restrictions. The OOP
+`ResearchWatchlistService` uses the shared ledger service for storage selection.
+IDs are canonical, additions/deletions are idempotent, and each user can save up
+to 100 securities. Changed watchlists increment the aggregate revision. The
+optional `research_watchlist` state field survives database backups and workbook
+export/import; import validates IDs and older backups remain compatible.
+
+Financial trends reuse the quarterly results and five-year annual statements.
+Separate SVG plots show revenue, profit after tax, explicit free cash flow and
+profit margin (profit after tax divided by positive revenue). The view offers
+quarterly/annual selection and an exact-value table. Chart scales are independent,
+include zero and support losses. Missing values or omitted periods break lines.
+Dates reflect fiscal period ends, not announcement dates. Annual financials now
+use reporting currency too, with a new cache key to avoid reusing responses
+labelled with the trading currency. The view does not forecast future results.

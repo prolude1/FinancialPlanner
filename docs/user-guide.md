@@ -124,3 +124,18 @@ Interest settles before principal. Extra payments retain the installment and sho
 ## Data refresh limits
 
 Prices and FX refresh every fifteen minutes, and newly entered instruments may remain unpriced until that cycle. US catalogue listings refresh daily by default. Brokerage valuation history is derived from the event ledger, historical daily closes, and historical FX, and refreshes every six hours by default. The 5%, 10%, and 15% deposit scenarios refresh separately on startup and each worker poll. During a historical FX outage, previously retrieved rates remain usable and the chart warns when they were used, including the last successful retrieval time. Deposit corrections and cancellations still update the scenarios. If no usable historical rate exists for a deposit, the chart continues with converted deposits and warns that some contributions were excluded. The close and midpoint come from the latest usable completed Yahoo daily bar with a 30-minute post-close buffer; the free provider does not certify an official closing auction price. Each quote shows its session date. Stock splits require /split and do not occur automatically.
+
+### Research holdings and candidates
+
+Open **Stocks** to see **Research your holdings**. Each exchange/ticker appears
+once, with the brokerage accounts that hold it. Select a holding, or search for
+a company or ETF. Select **Add to watchlist** to save a research candidate; the
+watchlist belongs to your signed-in account and is separate from owned holdings.
+Use **Remove** to remove a candidate without affecting any transactions.
+
+The **Financial trends** view offers **Quarterly** and **Annual** buttons, with
+separate charts for revenue, profit after tax, free cash flow and profit margin.
+Expand **Exact trend values** for the underlying figures. Values use the reporting
+currency. Missing values remain unavailable, and missing periods break the line.
+ETFs do not have corporate quarterly results. Chart dates are fiscal period ends;
+use the quarterly timeline below for year-over-year comparisons and data coverage.

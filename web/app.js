@@ -18,6 +18,7 @@ async function api(path, options={}) {
   return apiClient.request(path, options);
 }
 function showLogin(message=''){
+  researchWatchlist?.invalidate();
   brokerageHistoryRefresh?.invalidate();
   data=null;me=null;revision=-1;dataDate='';bankCashflow=null;recurringSchedules=null;recurringSchedulesLoading=false;recurringSchedulesError='';recurringSchedulesRequest++;
   $('#shell').hidden=true;$('#login').hidden=false;$('#content').replaceChildren();$('#notice').replaceChildren();
@@ -37,6 +38,14 @@ function empty(title, text){return `<div class="empty"><strong>${title}</strong>
 function accountName(id){ return data.accounts.find(a=>a.id===id)?.name || id; }
 function creditAccountName(id){ return data.credit_accounts?.find(a=>a.id===id)?.name || id; }
 async function initializeFeatures(){
+  const [{createHoldingsResearchPanel},{createFinancialTrendPanel},{createResearchWatchlist}]=await Promise.all([
+    import('./features/stocks/holdings-research.js'),
+    import('./features/stocks/financial-trends.js'),
+    import('./features/stocks/research-watchlist.js'),
+  ]);
+  holdingsResearchPanel=createHoldingsResearchPanel({esc});
+  financialTrendPanel=createFinancialTrendPanel({esc});
+  researchWatchlist=createResearchWatchlist({api,esc,onUpdate:()=>{if(route().page==='stocks')render();}});
   const {createQuarterlyResultsPanel}=await import('./features/stocks/quarterly-results.js');
   quarterlyResultsPanel=createQuarterlyResultsPanel({esc});
   const [{createDashboardPages},{createLoanForms},{createBrokerageChartController}]=await Promise.all([
@@ -180,6 +189,10 @@ document.addEventListener('click',e=>{
   if(action==='backup-confirm')confirmBackupImport();
   if(action==='backup-cancel')cancelBackupImport();
   if(action==='stock-option')chooseStockResult(Number(b.dataset.index));
+  if(action==='stock-trend-period'){stockState.trendPeriod=b.dataset.value;render();}
+  if(action==='watchlist-toggle')researchWatchlist?.update(b.dataset.id,b.dataset.remove==='true');
+  if(action==='watchlist-remove')researchWatchlist?.update(b.dataset.id,true);
+  if(action==='watchlist-retry')researchWatchlist?.retry();
   if(action==='stock-retry'&&stockState.selected)loadStock(stockState.selected,true);
   if(action==='stock-range'){stockState.range=b.dataset.value;if(stockState.selected)loadStock(stockState.selected,true);}
   if(action==='calculator-plan'){calculatorPlanMode=b.dataset.value;calculatorResult=null;render();}

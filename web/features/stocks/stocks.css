@@ -279,3 +279,18 @@
 .quarterly-timeline dd {margin:6px 0 0;font-weight:600;}
 .quarterly-timeline small {display:block;font-weight:400;color:var(--muted);margin-top:5px;}
 @media(max-width:650px){.quarterly-timeline dl {grid-template-columns:1fr;}}
+
+.research-holdings-list {list-style:none;padding:0;display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;}
+.research-holdings-list a {display:block;border:1px solid var(--line);border-radius:8px;padding:12px;text-decoration:none;color:var(--ink);}
+.research-holdings-list a[aria-current] {border-color:var(--green);background:var(--bg);}
+.research-holdings-list span,.research-holdings-list small {display:block;margin-top:6px;color:var(--muted);}
+.research-watchlist-list {list-style:none;padding:0;}
+.research-watchlist-list li {display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 0;border-bottom:1px solid var(--line);}
+.financial-trend-grid {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:20px;}
+.financial-trend-grid article {min-width:0;}
+.financial-trend-grid svg {width:100%;height:auto;}
+.financial-trend-grid svg text {font-size:12px;fill:var(--muted);}
+.trend-axis {stroke:var(--line);stroke-width:1.5;}
+.trend-line {fill:none;stroke:var(--green);stroke-width:2;}
+.trend-point {fill:var(--green);}
+@media(max-width:650px){.financial-trend-grid {grid-template-columns:1fr;}}

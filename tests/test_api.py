@@ -1050,3 +1050,19 @@ def test_quarterly_results_endpoint_authentication_and_limits(client, monkeypatc
     assert response.status_code == 200 and response.json()["quarters"] == []
     fake.quarterly_results.assert_called_once_with("NASDAQ:AAPL", 8)
     assert client.get(path + "?quarters=9", headers=headers).status_code == 422
+
+
+def test_watchlist_routes_preserve_tenant_isolation(client, monkeypatch):
+    path = '/api/research/watchlist'
+    assert client.get(path).status_code == 401
+    monkeypatch.setattr(api, 'verified_keycloak_principal', lambda request: request.headers['authorization'][7:])
+    owner = {'Authorization': 'Bearer owner-a'}
+    other = {'Authorization': 'Bearer owner-b', 'X-User-ID': 'owner-a'}
+    assert client.put(path + '/NASDAQ:AAPL', headers=owner).json() == {'security_ids': ['NASDAQ:AAPL']}
+    response = client.get(path, headers=other)
+    assert response.json() == {'security_ids': []}
+    assert response.headers['cache-control'] == 'no-store'
+    assert client.put(path + '/INVALID', headers=owner).status_code == 422
+    assert client.delete(path + '/NASDAQ:AAPL', headers=other).json() == {'security_ids': []}
+    assert client.get(path, headers=owner).json()['security_ids'] == ['NASDAQ:AAPL']
+    assert client.delete(path + '/NASDAQ:AAPL', headers=owner).json() == {'security_ids': []}

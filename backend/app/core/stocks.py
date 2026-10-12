@@ -209,7 +209,7 @@ class YahooStockResearchProvider:
 
     def financials(self, exchange, symbol, years):
         security = self.identity(exchange, symbol)
-        rows, currency = self._financial_rows(exchange, symbol, "yearly", years)
+        rows, currency = self._financial_rows(exchange, symbol, "yearly", years, reporting_currency=True)
         for row in rows:
             row["fiscal_year"] = int(row["period_end"][:4])
         return {"security_id": security["security_id"], "currency": currency,
@@ -304,7 +304,7 @@ class StockService:
 
     def financials(self, security_id, years):
         exchange, symbol = parse_security_id(security_id)
-        return self._load(security_id, f"financials:{years}",
+        return self._load(security_id, f"financials:{years}:reporting-currency",
                           lambda: self.provider.financials(exchange, symbol, years))
 
     def latest_earnings(self, security_id):

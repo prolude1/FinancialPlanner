@@ -209,3 +209,17 @@ def test_upload_bounds_and_stale_confirmation(isolated_db, monkeypatch):
     with pytest.raises(workbook.WorkbookError, match="changed after validation"):
         workbook.commit_import(preview["archive_sha256"], preview["current_revision"],
                                preview["current_etag"], preview["confirmation_token"])
+
+
+def test_research_watchlist_survives_workbook_export(isolated_db):
+    with store.transaction() as data:
+        data['research_watchlist'] = ['NASDAQ:AAPL', 'SGX:D05']
+    parsed = workbook.read_workbook(workbook.snapshot_bytes()[0])
+    assert parsed['tables']['planner_state']['data']['research_watchlist'] == ['NASDAQ:AAPL', 'SGX:D05']
+
+
+def test_invalid_research_watchlist_is_rejected_on_import(isolated_db):
+    with store.transaction() as data:
+        data['research_watchlist'] = ['<script>']
+    with pytest.raises(workbook.WorkbookError, match='invalid security ID'):
+        workbook.read_workbook(workbook.snapshot_bytes()[0])

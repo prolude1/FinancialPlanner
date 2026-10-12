@@ -23,6 +23,7 @@ from ..core.command_service import (
 )
 from ..core.stocks import StockProviderError, service as stock_service
 from ..core.ledger_service import FinancialLedgerService
+from ..core.research_watchlist import ResearchWatchlistService
 from ..core.views import cashflow_summary
 from ..core import data_workbook
 from ..core import keycloak_identity, telegram_linking, recurring as recurring_service
@@ -31,6 +32,7 @@ from .brokerage_history_routes import (BrokerageHistoryQueryService,
                                       create_brokerage_history_router)
 
 ledger_service = FinancialLedgerService(store)
+research_watchlist = ResearchWatchlistService(ledger_service)
 
 SECRET = os.environ.get("SESSION_SECRET", "")
 if len(SECRET) < 32:
@@ -607,6 +609,34 @@ def stock_quarterly_results(security_id: str, request: Request,
                             quarters: int = Query(default=8, ge=1, le=8)):
     identity(request)
     return stock_service.quarterly_results(security_id, quarters)
+
+
+@app.get("/api/research/watchlist")
+def get_research_watchlist(request: Request, response: Response):
+    response.headers["Cache-Control"] = "no-store"
+    principal, _ = ledger_access(request)
+    return research_watchlist.read(principal)
+
+
+@app.put("/api/research/watchlist/{security_id}")
+def add_research_candidate(security_id: str, request: Request, response: Response):
+    response.headers["Cache-Control"] = "no-store"
+    principal, actor = ledger_access(request)
+    if actor == "web" and principal is None:
+        csrf(request)
+    try:
+        return research_watchlist.update(principal, security_id)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from None
+
+
+@app.delete("/api/research/watchlist/{security_id}")
+def remove_research_candidate(security_id: str, request: Request, response: Response):
+    response.headers["Cache-Control"] = "no-store"
+    principal, actor = ledger_access(request)
+    if actor == "web" and principal is None:
+        csrf(request)
+    return research_watchlist.update(principal, security_id, remove=True)
 
 
 @app.post("/api/commands/{command}")

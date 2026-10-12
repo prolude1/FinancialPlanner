@@ -472,6 +472,17 @@ def _validate_tables(metadata, rows_by_sheet):
                 "bot": dict, "provider_status": dict}
     if not isinstance(data, dict):
         raise WorkbookError("Planner State data must be an object")
+    candidates = data.get("research_watchlist", [])
+    if not isinstance(candidates, list) or len(candidates) > 100 or any(
+            not isinstance(candidate, str) for candidate in candidates):
+        raise WorkbookError("Research watchlist must contain at most 100 security IDs")
+    from .stocks import parse_security_id, StockProviderError
+    try:
+        canonical = [":".join(parse_security_id(candidate)) for candidate in candidates]
+    except StockProviderError:
+        raise WorkbookError("Research watchlist contains an invalid security ID") from None
+    if canonical != candidates or len(set(canonical)) != len(canonical):
+        raise WorkbookError("Research watchlist security IDs must be canonical and unique")
     for key, kind in expected.items():
         if key not in data or not isinstance(data[key], kind):
             raise WorkbookError(f"Planner State is missing or has malformed {key}")
