@@ -5,9 +5,10 @@ const fmt = (v, digits=2) => v == null ? 'Unavailable' : Number(v).toLocaleStrin
 const labels = {cash:'Cash', equity:'Equities', etf:'ETFs', cpf:'CPF'};
 const colors = {cash:'#b9d291', equity:'#1f6152', etf:'#78a58d', cpf:'#e4d7ad'};
 let data, revision=-1, dataDate='', polling=false, lastLoaded=0, me=null;
-const chartState={};
 const PlannerAuth=globalThis.PlannerAuth||{configured:false,authenticated:false,request:async()=>{throw new Error('Keycloak sign-in is not configured.');},init:async()=>false,login:async()=>{},logout:async()=>{}};
-let dashboardPages, loanForms;
+let dashboardPages, loanForms, recurringTransactions, brokerageChartController;
+let recurringSchedules = null, recurringSchedulesLoading = false, recurringSchedulesError = '';
+let recurringSchedulesRequest = 0;
 
 let apiClientPromise;
 async function api(path, options={}) {
@@ -17,7 +18,7 @@ async function api(path, options={}) {
   return apiClient.request(path, options);
 }
 function showLogin(message=''){
-  data=null;me=null;revision=-1;dataDate='';bankCashflow=null;
+  data=null;me=null;revision=-1;dataDate='';bankCashflow=null;recurringSchedules=null;recurringSchedulesLoading=false;recurringSchedulesError='';recurringSchedulesRequest++;
   $('#shell').hidden=true;$('#login').hidden=false;$('#content').replaceChildren();$('#notice').replaceChildren();
   $('#modal').close();$('#modal-body').replaceChildren();
   $('#claim-owner').hidden=true;$('#owner-claim-state').hidden=true;
@@ -35,11 +36,16 @@ function empty(title, text){return `<div class="empty"><strong>${title}</strong>
 function accountName(id){ return data.accounts.find(a=>a.id===id)?.name || id; }
 function creditAccountName(id){ return data.credit_accounts?.find(a=>a.id===id)?.name || id; }
 async function initializeFeatures(){
-  const [{createDashboardPages},{createLoanForms}]=await Promise.all([
+  const [{createDashboardPages},{createLoanForms},{createBrokerageChartController}]=await Promise.all([
     import('./features/dashboard/dashboard-pages.js'),
     import('./features/loans/loan-forms.js'),
+    import('./features/dashboard/brokerage-chart-controller.js'),
   ]);
-  dashboardPages=createDashboardPages({$,esc,fmt,labels,colors,chartState,badge,empty,historyTable,latestTransactionsFirst});
+  const {recurringSchedulesPanel,recurringAmountForm}=await import('./features/recurring-transactions/recurring-transactions.js');
+  recurringTransactions={recurringSchedulesPanel,recurringAmountForm};
+  brokerageChartController=createBrokerageChartController({getData:()=>data,getDashboardPages:()=>dashboardPages,documentRef:document});
+  dashboardPages=createDashboardPages({$,esc,fmt,labels,colors,chartState:brokerageChartController.state,badge,empty,historyTable,latestTransactionsFirst});
+  brokerageChartController.attach();
   loanForms=createLoanForms({$,esc,fmt,input,openModal,formFooter,submitCommand});
 }
 function render(){
@@ -48,6 +54,7 @@ function render(){
   const {page,id}=route();
   const focusedSearch=document.activeElement?.id==='stock-search-input',selection=focusedSearch?{start:document.activeElement.selectionStart,end:document.activeElement.selectionEnd}:null;
   const titles={overview:['THE BIG PICTURE','Your financial overview','Every account. One place.'],stocks:['MARKET RESEARCH','Stocks','Completed-session prices and reported fundamentals.'],'credit-cards':['YOUR CREDIT CARDS','Credit-card dashboard','Balances, purchases, refunds, and payments in SGD.'],accounts:['YOUR ACCOUNTS','A home for every account','Balances and holdings, in their original currencies.'],loans:['YOUR COMMITMENTS','Loans & repayments','See what is outstanding and what comes next.'],calculator:['PLAN AHEAD','Present & Future Value','Explore contributions, withdrawals, returns, and time.'],'data-management':['YOUR DATA','Backup and restore','Export or replace all application data.'],activity:['YOUR FINANCIAL RECORD','Transaction history','Search, review, correct, or cancel existing transactions. New transactions are still recorded in Telegram.']};
+  titles.recurring=['SCHEDULED LEDGER ENTRIES','Recurring transactions','Review ongoing monthly and annual ledger schedules.'];
   const t=titles[page] || titles.overview;
   $('#page-eyebrow').textContent=t[0]; $('#page-title').textContent=t[1]; $('#page-subtitle').textContent=t[2];
   $('#crumb').textContent=page==='credit-cards'?'Credit cards':page==='activity'?'Transaction history':page.charAt(0).toUpperCase()+page.slice(1);
@@ -56,13 +63,21 @@ function render(){
   const failures=Object.entries(data.provider_status).filter(([,v])=>!v.ok).map(([k,v])=>`${k}: ${v.message}`);
   const warnings=['credit-cards','calculator','stocks'].includes(page)?[]:[...data.missing,...data.warnings,...failures];
   $('#notice').innerHTML=warnings.length?`<div class="notice"><strong>${data.complete?'Some valuations need attention':'Totals are incomplete'}</strong><ul>${warnings.map(w=>`<li>${esc(w)}</li>`).join('')}</ul></div>`:'';
-  $('#content').innerHTML=page==='stocks'?stocksPage(id):page==='credit-cards'?dashboardPages.creditCardsPage(id):page==='accounts'?dashboardPages.accountsPage(id):page==='loans'?dashboardPages.loansPage():page==='calculator'?calculatorPage():page==='data-management'?backupPage():page==='activity'?activityPage():dashboardPages.overview();
+  $('#content').innerHTML=page==='stocks'?stocksPage(id):page==='credit-cards'?dashboardPages.creditCardsPage(id):page==='accounts'?dashboardPages.accountsPage(id):page==='loans'?dashboardPages.loansPage():page==='calculator'?calculatorPage():page==='data-management'?backupPage():page==='activity'?activityPage():page==='recurring'?recurringTransactions.recurringSchedulesPanel({schedules:recurringSchedules||[],loading:recurringSchedulesLoading,error:recurringSchedulesError}):dashboardPages.overview();
+  if(page==='recurring'&&recurringSchedules===null&&!recurringSchedulesLoading)loadRecurringSchedules();
   if(page==='activity'){if(bankCashflow)renderBankCashflow();else loadBankCashflow(bankCashflowYear);}
-  document.querySelectorAll('.brokerage-chart').forEach(chart=>dashboardPages.drawBrokerageChart(chart.dataset.account));
+  brokerageChartController.drawAll();
   if(focusedSearch){const input=$('#stock-search-input');input?.focus({preventScroll:true});if(input&&selection)input.setSelectionRange(selection.start,selection.end);}
 }
+async function loadRecurringSchedules(){
+  const request=++recurringSchedulesRequest;
+  recurringSchedulesLoading=true;recurringSchedulesError='';render();
+  try{const payload=await api('/recurring-transactions');if(request===recurringSchedulesRequest)recurringSchedules=(Array.isArray(payload?.schedules)?payload.schedules:[]).filter(schedule=>schedule.status!=='stopped');}
+  catch(error){if(request===recurringSchedulesRequest)recurringSchedulesError=error.message||'Unable to load recurring schedules.';}
+  finally{if(request===recurringSchedulesRequest){recurringSchedulesLoading=false;if(route().page==='recurring')render();}}
+}
 async function load(){
-  data=await api('/dashboard'); revision=data.revision; dataDate=data.as_of; lastLoaded=Date.now();bankCashflow=null;
+  data=await api('/dashboard'); revision=data.revision; dataDate=data.as_of; lastLoaded=Date.now();bankCashflow=null;recurringSchedules=null;recurringSchedulesRequest++;
   $('#login').hidden=true; $('#shell').hidden=false;
   $('#connection').textContent='● Connected · updated '+new Date().toLocaleTimeString('en-SG',{hour:'2-digit',minute:'2-digit'});
   render();
@@ -91,6 +106,31 @@ function openOwnerClaim(){
     finally{button.disabled=false;}
   };
 }
+function openRecurringAmount(scheduleId){
+  const schedule=recurringSchedules?.find(item=>item.id===scheduleId);
+  if(!schedule)return;
+  openModal('Update future recurring amount',recurringTransactions.recurringAmountForm(schedule));
+  $('#recurring-amount-form').onsubmit=async event=>{
+    event.preventDefault();
+    const form=event.currentTarget,button=form.querySelector('[type="submit"]');
+    const amount=String(new FormData(form).get('amount')||'').trim();
+    button.disabled=true;$('#recurring-amount-error').textContent='';
+    try{
+      await api(`/recurring-transactions/${encodeURIComponent(schedule.id)}`,{method:'PATCH',body:JSON.stringify({amount})});
+      $('#modal').close();recurringSchedules=null;await loadRecurringSchedules();toast('Future recurring amount updated. Past ledger transactions were kept unchanged.');
+    }catch(error){$('#recurring-amount-error').textContent=error.message||'Unable to update the recurring amount.';button.disabled=false;}
+  };
+}
+async function deleteRecurringSchedule(scheduleId){
+  const schedule=recurringSchedules?.find(item=>item.id===scheduleId);
+  if(!schedule)return;
+  const name=schedule.description||'this recurring schedule';
+  if(!window.confirm(`Delete “${name}”? Future ledger entries will stop. Transactions already posted will remain in your history.`))return;
+  try{
+    await api(`/recurring-transactions/${encodeURIComponent(schedule.id)}`,{method:'DELETE'});
+    recurringSchedules=null;await loadRecurringSchedules();toast('Recurring schedule deleted. Existing ledger transactions were kept.');
+  }catch(error){toast(error.message||'Unable to delete the recurring schedule.');}
+}
 function input(name,label,type='text',value='',extra=''){return `<label>${label}<input name="${name}" type="${type}" value="${esc(value)}" ${extra} required></label>`;}
 function openModal(title,html){$('#modal-title').textContent=title;$('#modal-body').innerHTML=html;$('#modal').showModal();}
 function formFooter(label){return `<p id="form-error" class="error" role="alert"></p><div class="form-actions"><button type="button" class="secondary" data-action="close">Cancel</button><button type="submit">${label}</button></div>`;}
@@ -105,9 +145,8 @@ async function submitCommand(command,payload,form){
 }
 document.addEventListener('click',e=>{
   const b=e.target.closest('[data-action]');if(!b)return;
+  if(brokerageChartController?.handleAction(b))return;
   const action=b.dataset.action;
-  if(action==='chart-period'){const root=b.closest('.brokerage-chart'),rows=data.portfolio_history[root.dataset.account]||[],state=chartState[root.dataset.account];state.period=b.dataset.value;[state.start,state.end]=dashboardPages.historyRange(rows,state.period);dashboardPages.drawBrokerageChart(root.dataset.account);}
-  if(action==='chart-metric'){const root=b.closest('.brokerage-chart');chartState[root.dataset.account].metric=b.dataset.value;dashboardPages.drawBrokerageChart(root.dataset.account);}
   if(action==='stock-search')searchStocks();
   if(action==='backup-export')exportBackup();
   if(action==='backup-sample')downloadBackupTemplate();
@@ -117,6 +156,9 @@ document.addEventListener('click',e=>{
   if(action==='cashflow-event')focusRelatedTransaction(b.dataset.id);
   if(action==='cashflow-month')changeBankCashflowMonth(b.dataset.month);
   if(action==='cashflow-retry')loadBankCashflow(bankCashflowYear);
+  if(action==='recurring-retry'){recurringSchedules=null;loadRecurringSchedules();}
+  if(action==='recurring-edit-amount')openRecurringAmount(b.dataset.id);
+  if(action==='recurring-delete')deleteRecurringSchedule(b.dataset.id);
   if(action==='history-reset')resetHistoryFilters();
   if(action==='backup-confirm')confirmBackupImport();
   if(action==='backup-cancel')cancelBackupImport();
@@ -164,11 +206,10 @@ document.addEventListener('keydown',e=>{
   const chart=e.target.closest?.('.candle-chart');if(chart&&(e.key==='ArrowLeft'||e.key==='ArrowRight')){e.preventDefault();const count=stockState.candles?.candles?.length||0,saved=chart.dataset.candleIndex!==undefined&&chart.dataset.candleIndex!==''?Number(chart.dataset.candleIndex):stockState.candleIndex,index=nextCandleIndex(saved,e.key,count);if(index!=null)selectCandle(chart,index,true);}else if(chart&&e.key==='Escape'){clearCandle(chart);chart.dataset.pinned='false';}
 });
 document.addEventListener('submit',e=>{if(e.target.id==='calculator-form'){e.preventDefault();calculateTimeValue(e.target);}});
-document.addEventListener('pointermove',e=>{if(e.target.matches('[data-action="chart-hover"]'))dashboardPages.chartHover(e);if(e.target.matches('[data-action="calculator-chart-hover"]'))calculatorChartHover(e);if(e.target.matches('[data-action="stock-candle-hover"]'))candleFromPointer(e,e.pointerType==='touch');});
+document.addEventListener('pointermove',e=>{if(e.target.matches('[data-action="calculator-chart-hover"]'))calculatorChartHover(e);if(e.target.matches('[data-action="stock-candle-hover"]'))candleFromPointer(e,e.pointerType==='touch');});
 document.addEventListener('pointerdown',e=>{if(e.target.matches('[data-action="calculator-chart-hover"]')){e.target.setPointerCapture?.(e.pointerId);calculatorChartHover(e);}if(e.target.matches('[data-action="stock-candle-hover"]')){if(e.pointerType==='touch')e.target.setPointerCapture?.(e.pointerId);candleFromPointer(e,true);}});
 document.addEventListener('pointerout',e=>{const chart=e.target.closest?.('.candle-chart');if(chart&&!chart.contains(e.relatedTarget)&&chart.dataset.pinned!=='true')clearCandle(chart);});
 document.addEventListener('click',e=>{if(!e.target.closest('.stock-search')&&stockState.suggestionsOpen){stockState.suggestionsOpen=false;stockState.highlight=-1;renderStockSearch();}});
-document.addEventListener('wheel',e=>{const root=e.target.closest?.('.brokerage-chart');if(!root)return;e.preventDefault();const rows=data.portfolio_history[root.dataset.account]||[],state=chartState[root.dataset.account],span=state.end-state.start+1;if(rows.length<2)return;const factor=(e.deltaY<0)?0.8:1.25,next=Math.min(rows.length,Math.max(2,Math.round(span*factor))),rect=root.querySelector('svg').getBoundingClientRect(),focus=Math.max(0,Math.min(1,(e.clientX-rect.left)/rect.width)),center=state.start+Math.round(focus*(span-1));state.start=Math.max(0,Math.min(rows.length-next,center-Math.round(focus*(next-1))));state.end=state.start+next-1;state.period='custom';dashboardPages.drawBrokerageChart(root.dataset.account);},{passive:false});
 $('#close-modal').onclick=()=>$('#modal').close();
 $('#keycloak-sign-in').onclick=async()=>{const button=$('#keycloak-sign-in');button.disabled=true;$('#login-error').textContent='';try{await PlannerAuth.login();}catch(error){$('#login-error').textContent=error.message||'Unable to start Keycloak sign-in.';button.disabled=false;}};
 $('#logout').onclick=async()=>{showLogin();try{await PlannerAuth.logout();}catch(error){$('#login-error').textContent=error.message||'Unable to sign out of Keycloak.';}};

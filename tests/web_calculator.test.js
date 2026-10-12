@@ -2,10 +2,23 @@ const assert = require('assert');
 const fs = require('fs');
 const vm = require('vm');
 
-const context = vm.createContext({console, URLSearchParams, AbortController, queueMicrotask: () => {}});
+const context = vm.createContext({
+  console,
+  URLSearchParams,
+  AbortController,
+  queueMicrotask: () => {},
+  esc: value => String(value ?? ''),
+  fmt: value => String(value ?? ''),
+  empty: (title, text) => `<div>${title} ${text}</div>`,
+});
 const sharedSource = fs.readFileSync('web/app.js', 'utf8').split("document.addEventListener('click'")[0];
 vm.runInContext(fs.readFileSync('web/features/calculator/calculator.js', 'utf8'), context);
 vm.runInContext(sharedSource, context);
+
+const calculatorMarkup = vm.runInContext('calculatorPage()', context);
+assert(calculatorMarkup.includes('name="cashflow_frequency"'));
+assert(calculatorMarkup.includes('<option value="monthly" selected>Monthly</option>'));
+assert.match(calculatorMarkup, /<option value="annual"\s*>Annual<\/option>/);
 
 assert.equal(vm.runInContext(`contributionWindowSummary({cashflow_start_years:'0',cashflow_start_remainder_months:'0',cashflow_end_mode:'plan'})`, context), 'Contributions: entire plan');
 assert.equal(vm.runInContext(`contributionWindowSummary({cashflow_start_years:'3',cashflow_start_remainder_months:'0',cashflow_end_mode:'custom',cashflow_end_years:'8',cashflow_end_remainder_months:'0'})`, context), 'Contributions: Year 3–Year 8');

@@ -61,6 +61,48 @@ class TelegramLinkConfirm(Command):
     chat_type: Literal["private"]
 
 
+class RecurringScheduleCreate(Command):
+    account: str = Field(min_length=1, max_length=80)
+    amount: str = Field(min_length=1, max_length=64)
+    description: str = Field(min_length=1, max_length=160)
+    cadence: Literal["monthly", "annual"]
+    day_of_month: int = Field(strict=True, ge=1, le=31)
+    month_of_year: int | None = Field(default=None, strict=True, ge=1, le=12)
+
+    @model_validator(mode="after")
+    def validate_cadence_date(self):
+        if self.cadence == "monthly" and (self.day_of_month > 28 or self.month_of_year is not None):
+            raise ValueError("Monthly schedules use day 1–28 and no month_of_year")
+        if self.cadence == "annual":
+            if self.month_of_year is None:
+                raise ValueError("Annual schedules require month_of_year")
+            maximum = 28 if self.month_of_year == 2 else 30 if self.month_of_year in (4, 6, 9, 11) else 31
+            if self.day_of_month > maximum:
+                raise ValueError("Annual date must be valid every year")
+        return self
+
+
+class RecurringSchedulePatch(Command):
+    amount: str | None = Field(default=None, min_length=1, max_length=64)
+    status: Literal["active", "paused", "stopped"] | None = None
+
+    @model_validator(mode="after")
+    def require_one_change(self):
+        if len(self.model_fields_set) != 1 or next(iter(self.model_fields_set)) not in ("amount", "status"):
+            raise ValueError("Update exactly one of amount or status")
+        if self.amount is None and "amount" in self.model_fields_set:
+            raise ValueError("Amount cannot be null")
+        if self.status is None and "status" in self.model_fields_set:
+            raise ValueError("Status cannot be null")
+        return self
+
+
+class RecurringBotScheduleCreate(Command):
+    telegram_user_id: int = Field(gt=0, le=4503599627370495, strict=True)
+    telegram_chat_id: int = Field(gt=0, le=4503599627370495, strict=True)
+    schedule: RecurringScheduleCreate
+
+
 class AccountAdd(Command):
     name: str
     type: Literal["bank", "brokerage", "cpf"]

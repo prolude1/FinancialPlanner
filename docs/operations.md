@@ -58,6 +58,9 @@ With a blank token or owner ID, the bot stays idle. With credentials present, bo
 | `WEB_PORT` | Local web port, default 8080 |
 | `APP_TIMEZONE` | Transaction date defaults; `Asia/Singapore` initially |
 | `MARKET_POLL_SECONDS` | Price/FX worker interval, default 900, minimum 60 |
+| `HISTORY_REFRESH_SECONDS` | Brokerage valuation history interval, default 21600 (six hours) |
+| `DEPOSIT_HISTORY_REFRESH_SECONDS` | Brokerage deposit projection interval; default 0 runs on every worker poll and at startup |
+| `WORKER_LOG_LEVEL` | Worker log level, default `INFO` |
 | `STOCK_PRICE_PROVIDER` | Stock/ETF quote provider selected by the provider factory; default `yahoo` |
 
 ## Local Keycloak setup
@@ -91,6 +94,8 @@ docker compose down
 ```
 
 Normal `down` preserves the database volume. Do not add `-v` to a normal shutdown: that deletes the volume. Laptop sleep stops responsiveness; services reconnect when available. The worker refreshes completed-session data on startup and then periodically.
+
+Brokerage deposit projections refresh independently of historical stock valuations. By default, the worker rebuilds deposit contributions on startup and on each market poll, while valuation history refreshes every six hours. A failed historical stock-price request does not stop the deposit job. When a deposit's historical FX rate is unavailable, known contributions remain in the projection and the chart identifies the excluded contribution count and dates. The worker logs job results and safe failure categories with traceback locations; logs omit transaction payloads and credentials. Run `docker compose logs --tail=100 worker` to inspect recent jobs. The worker container retains up to five 10 MB local log files.
 
 The dashboard shows connection state, price dates, missing valuations, and provider failures. Data lacking a price/rate is excluded from aggregates with an explicit incomplete-total warning. Broker quantities and native cash remain visible.
 

@@ -358,13 +358,15 @@ def test_monthly_cashflow_uses_active_cash_events_and_native_currency_series():
                       "usd": {"id": "usd", "name": "USD Bank", "type": "bank"},
                       "broker": {"id": "broker", "name": "Brokerage", "type": "brokerage"},
                       "cpf": {"id": "cpf", "name": "CPF OA", "type": "cpf"}}
-    s["credit_accounts"] = {"cardacct": {"id": "cardacct", "name": "Card"}}
+    s["credit_accounts"] = {"cardacct": {"id": "cardacct", "name": "Main Card", "currency": "SGD",
+                                           "cards": {"visa": {"id": "visa", "name": "Visa"}}}}
     def event(ident, kind, when, data, status="active", **extra):
         s["events"].append({"id": ident, "kind": kind, "date": when, "order": len(s["events"]),
                             "data": data, "status": status, **extra})
     event("old", "deposit", "2026-01-29", {"account": "sgd", "currency": "SGD", "amount": "100"}, "superseded", replaces="x")
     event("x", "deposit", "2026-01-29", {"account": "sgd", "currency": "SGD", "amount": "100"}, "superseded", replaces="new")
     event("new", "deposit", "2026-02-02", {"account": "sgd", "currency": "SGD", "amount": "100.10"})
+    event("cash-out", "withdraw", "2026-02-04", {"account": "sgd", "currency": "SGD", "amount": "10"})
     event("broker-deposit", "deposit", "2026-02-02", {"account": "broker", "currency": "USD", "amount": "900"})
     event("cpf-withdraw", "withdraw", "2026-02-02", {"account": "cpf", "currency": "SGD", "amount": "30"})
     event("void", "withdraw", "2026-02-03", {"account": "sgd", "currency": "SGD", "amount": "70"}, "void")
@@ -372,9 +374,11 @@ def test_monthly_cashflow_uses_active_cash_events_and_native_currency_series():
     event("loan-in", "loan_disbursement", "2026-02-05", {"account": "sgd", "currency": "SGD", "amount": "15"})
     event("repay", "repayment", "2026-02-06", {"loan": "loan", "amount": "7",
           "allocations": [{"account": "sgd", "amount": "7"}]})
-    event("pay", "credit_payment", "2026-02-06", {"funding_account": "sgd", "credit_account": "cardacct", "currency": "SGD", "amount": "20"})
+    event("pay", "credit_payment", "2026-03-06", {"funding_account": "sgd", "credit_account": "cardacct", "currency": "SGD", "amount": "20"})
     event("buy-card", "credit_purchase", "2026-02-07", {"credit_account": "cardacct", "card": "visa", "currency": "SGD", "amount": "50", "description": "Food"})
     event("refund", "credit_refund", "2026-02-08", {"credit_account": "cardacct", "card": "visa", "currency": "SGD", "amount": "8", "description": "Return"})
+    event("old-card-buy", "credit_purchase", "2026-02-05", {"credit_account": "cardacct", "card": "visa", "currency": "SGD", "amount": "99"}, "superseded")
+    event("future-card-buy", "credit_purchase", "2026-12-25", {"credit_account": "cardacct", "card": "visa", "currency": "SGD", "amount": "77"})
     event("transfer", "transfer", "2026-02-09", {"account": "sgd", "destination": "usd", "currency": "SGD", "amount": "30", "to_currency": "USD", "received": "22"})
     event("bank-to-broker", "transfer", "2026-02-10", {"account": "sgd", "destination": "broker", "currency": "SGD", "amount": "9", "to_currency": "USD", "received": "9"})
     event("broker-to-bank", "transfer", "2026-02-11", {"account": "broker", "destination": "sgd", "currency": "USD", "amount": "5", "to_currency": "SGD", "received": "6"})
@@ -385,7 +389,7 @@ def test_monthly_cashflow_uses_active_cash_events_and_native_currency_series():
                                    "end_month": "2026-12", "current_month_partial": True}
     sgd = result["currencies"]["SGD"]
     feb = next(row for row in sgd["months"] if row["month"] == "2026-02")
-    assert feb["inflow"] == "121.10" and feb["outflow"] == "36" and feb["net"] == "85.10"
+    assert feb["inflow"] == "121.10" and feb["outflow"] == "26" and feb["net"] == "95.10"
     assert feb["internal_transfer_in"] == "0" and feb["internal_transfer_out"] == "30"
     deposit = next(kind for kind in feb["by_kind"] if kind["kind"] == "deposit")
     assert deposit["transactions"][0]["id"] == "new"
@@ -393,9 +397,27 @@ def test_monthly_cashflow_uses_active_cash_events_and_native_currency_series():
     bank_detail = next(row for row in feb["by_account"] if row["account"] == "sgd")
     assert any(row["id"] == "new" for row in bank_detail["transactions"])
     assert {kind["kind"] for kind in feb["by_kind"]}.isdisjoint({"credit_purchase", "credit_refund"})
+    march = next(row for row in sgd["months"] if row["month"] == "2026-03")
+    assert march["outflow"] == "20"
+    dated = result["spending_by_transaction_date"]["currencies"]["SGD"]
+    dated_feb = next(row for row in dated["months"] if row["month"] == "2026-02")
+    assert dated_feb["inflow"] == "108.10" and dated_feb["outflow"] == "60"
+    assert dated_feb["net_recorded_movement"] == "48.10"
+    assert [row["id"] for row in dated_feb["transactions"]] == ["new", "cash-out", "buy-card", "refund"]
+    assert dated_feb["transactions"][0]["account_name"] == "SGD Bank"
+    assert dated_feb["transactions"][1]["direction"] == "outflow"
+    assert dated_feb["transactions"][2]["credit_account_name"] == "Main Card"
+    assert dated_feb["transactions"][2]["card_name"] == "Visa"
+    assert dated_feb["transactions"][2]["direction"] == "outflow"
+    assert dated_feb["transactions"][3]["direction"] == "inflow"
+    dated_march = next(row for row in dated["months"] if row["month"] == "2026-03")
+    assert dated_march["inflow"] == "0" and dated_march["outflow"] == "0"
+    assert dated_march["transactions"] == []
     assert "USD" in result["currencies"]
     assert result["currencies"]["USD"]["totals"]["inflow"] == "4.25"
     usd_feb = next(row for row in result["currencies"]["USD"]["months"] if row["month"] == "2026-02")
+    dated_usd = result["spending_by_transaction_date"]["currencies"]["USD"]
+    assert next(row for row in dated_usd["months"] if row["month"] == "2026-02")["inflow"] == "4.25"
     assert usd_feb["internal_transfer_in"] == "22"
     contributing_ids = {transaction["id"] for row in feb["by_kind"] for transaction in row["transactions"]}
     assert "bank-to-broker" in contributing_ids

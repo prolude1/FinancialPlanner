@@ -877,6 +877,16 @@ dialog::backdrop{
   stroke-linecap:round;
   stroke-linejoin:round
 }
+.chart-line-actual{stroke:var(--green)}
+.chart-projection-line{stroke-width:2;stroke-dasharray:7 5}
+.chart-projection-0,.chart-legend-projection.chart-projection-0{stroke:#b07926;background:#b07926;color:#b07926}
+.chart-projection-1,.chart-legend-projection.chart-projection-1{stroke:#287ba0;background:#287ba0;color:#287ba0}
+.chart-projection-2,.chart-legend-projection.chart-projection-2{stroke:#9759a6;background:#9759a6;color:#9759a6}
+.chart-legend{display:flex;flex-wrap:wrap;gap:8px 16px;margin:2px 0 12px;color:var(--muted);font-size:11px}
+.chart-legend span{display:flex;align-items:center;gap:6px}
+.chart-legend i{display:inline-block;width:16px;height:3px;background:var(--green)}
+.chart-legend .chart-legend-projection{height:2px;border-top:2px dashed currentColor;background:none}
+.chart-projection-status{margin:6px 0 12px;color:var(--muted);font-size:12px}
 .chart-plot text{
   fill:var(--muted);
   font-size:10px

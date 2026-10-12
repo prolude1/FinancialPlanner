@@ -4,7 +4,23 @@ from pathlib import Path
 from unittest.mock import Mock
 import pytest
 
-from app.telegram_bot.client import BackendClient
+from app.telegram_bot.client import BackendClient, send_handler_reply
+
+
+def test_handler_reply_includes_saved_inline_keyboard():
+    telegram = Mock()
+    telegram.post.return_value = Mock()
+    keyboard = {"inline_keyboard": [[{"text": "Accounts", "callback_data": "cmd:accounts"}]]}
+
+    send_handler_reply(telegram, "https://telegram.test/bot/", 303, "Choose an action", {
+        "pending_markup": keyboard,
+    })
+
+    telegram.post.assert_called_once_with(
+        "https://telegram.test/bot/sendMessage",
+        json={"chat_id": 303, "text": "Choose an action", "entities": [],
+              "reply_markup": keyboard},
+    )
 
 
 def test_backend_client_uses_sender_identity_for_scoped_financial_calls(monkeypatch):
@@ -37,6 +53,44 @@ def test_backend_client_uses_sender_identity_for_scoped_financial_calls(monkeypa
     assert http.post.call_args_list[3].kwargs["json"]["last_tvm"] == {"result": "500"}
     assert all(call.kwargs["headers"]["Authorization"] == "Bearer bot-secret"
                for call in http.post.call_args_list)
+
+
+def test_backend_client_creates_recurring_schedule_with_private_actor_and_idempotency(monkeypatch):
+    monkeypatch.setenv("BOT_API_SECRET", "bot-secret")
+    response = Mock()
+    response.json.return_value = {"schedule": {"id": "sched-1"}}
+    http = Mock()
+    http.post.return_value = response
+    backend = BackendClient(http)
+
+    result = backend.create_recurring_transaction(
+        {"account": "bank-1", "amount": "25.50", "description": "Phone plan",
+         "cadence": "monthly", "day_of_month": 15, "month_of_year": None},
+        "telegram-777", 123, 123)
+
+    assert result == {"schedule": {"id": "sched-1"}}
+    http.post.assert_called_once_with(
+        "/internal/bot/financial/recurring-transactions",
+        json={"telegram_user_id": 123, "telegram_chat_id": 123,
+              "schedule": {"account": "bank-1", "amount": "25.50",
+                           "description": "Phone plan", "cadence": "monthly",
+                           "day_of_month": 15, "month_of_year": None}},
+        headers={"Authorization": "Bearer bot-secret", "Idempotency-Key": "telegram-777"})
+
+
+def test_telegram_recurring_request_matches_backend_pydantic_contract():
+    from app.core.schemas import RecurringBotScheduleCreate
+
+    request = RecurringBotScheduleCreate.model_validate({
+        "telegram_user_id": 123, "telegram_chat_id": 123,
+        "schedule": {"account": "bank-1", "amount": "25.50", "description": "Phone plan",
+                     "cadence": "monthly", "day_of_month": 15, "month_of_year": None},
+    })
+
+    assert request.schedule.model_dump() == {
+        "account": "bank-1", "amount": "25.50", "description": "Phone plan",
+        "cadence": "monthly", "day_of_month": 15, "month_of_year": None,
+    }
 
 
 def test_backend_client_rejects_non_private_actor_shape_before_request():
@@ -87,6 +141,97 @@ def test_handler_state_is_scoped_to_each_telegram_actor():
     assert state_by_user[101]["session"]["data"]["account"] == "account-101"
     assert state_by_user[202]["session"]["command"] == "withdraw"
     assert state_by_user[202]["session"]["data"]["account"] == "account-202"
+
+
+def test_recurring_deduction_guides_monthly_schedule_and_uses_create_api():
+    from app.telegram_bot.handlers import handle
+
+    actor = 404
+    persisted = {"session": None}
+    created = []
+    dashboard = {"accounts": [
+        {"id": "bank-sgd", "name": "Main bank", "type": "bank", "currency": "SGD",
+         "archived": False, "native": {}, "complete": True},
+        {"id": "broker", "name": "Broker", "type": "brokerage", "currency": "USD",
+         "archived": False, "native": {}, "complete": True}],
+        "credit_accounts": []}
+
+    def send(update_id, text):
+        update = {"update_id": update_id, "message": {"from": {"id": actor},
+            "chat": {"id": actor, "type": "private"}, "text": text}}
+        return handle(update, actor, lambda: dashboard, lambda *_: pytest.fail("wrong mutation"),
+                      lambda: dict(persisted), lambda **fields: persisted.update(fields),
+                      create_recurring=lambda schedule, key: created.append((schedule, key)) or
+                      {"schedule": {"id": "schedule-1", "next_due_date": "2026-10-15"}})
+
+    send(1, "/recurring")
+    assert "Bank account" in persisted["pending_reply"]
+    send(2, "bank-sgd")
+    send(3, "monthly")
+    send(4, "USD 25")
+    assert "uses SGD" in persisted["pending_reply"]
+    send(5, "SGD 25.50")
+    send(6, "Phone plan")
+    send(7, "28")
+    assert "Review /recurring" in persisted["pending_reply"]
+    assert "month_of_year: None" in persisted["pending_reply"]
+    send(8, "/confirm")
+    assert created == [({"account": "bank-sgd", "amount": "25.50", "description": "Phone plan",
+                        "cadence": "monthly", "day_of_month": 28, "month_of_year": None},
+                       "telegram-8")]
+    assert "does not send bank payments" in persisted["pending_reply"]
+
+
+def test_recurring_annual_rejects_date_that_is_not_valid_every_year():
+    from app.telegram_bot.handlers import handle
+
+    actor = 505
+    persisted = {"session": None}
+    dashboard = {"accounts": [{"id": "bank", "name": "Main", "type": "bank", "currency": "SGD",
+                               "archived": False, "native": {}, "complete": True}],
+                 "credit_accounts": []}
+
+    def send(update_id, text):
+        update = {"update_id": update_id, "message": {"from": {"id": actor},
+            "chat": {"id": actor, "type": "private"}, "text": text}}
+        return handle(update, actor, lambda: dashboard, lambda *_: {"id": "ok"},
+                      lambda: dict(persisted), lambda **fields: persisted.update(fields),
+                      create_recurring=lambda *_: pytest.fail("invalid annual date reached API"))
+
+    for update_id, text in enumerate(("/recurring", "bank", "annual", "SGD 30", "Annual bill", "29"), 1):
+        send(update_id, text)
+    reply = send(7, "2")
+    assert "not valid every year" in reply
+    assert persisted["session"]["index"] == 5
+
+
+def test_recurring_annual_saves_selected_month_as_integer():
+    from app.telegram_bot.handlers import handle
+
+    actor = 506
+    persisted = {"session": None}
+    created = []
+    dashboard = {"accounts": [{"id": "bank", "name": "Main", "type": "bank",
+                               "currency": "SGD", "archived": False,
+                               "native": {}, "complete": True}],
+                 "credit_accounts": []}
+
+    def send(update_id, text):
+        update = {"update_id": update_id, "message": {"from": {"id": actor},
+            "chat": {"id": actor, "type": "private"}, "text": text}}
+        return handle(update, actor, lambda: dashboard, lambda *_: pytest.fail("wrong mutation"),
+                      lambda: dict(persisted), lambda **fields: persisted.update(fields),
+                      create_recurring=lambda schedule, key: created.append((schedule, key)) or
+                      {"schedule": {"id": "annual-1", "next_due_date": "2027-09-15"}})
+
+    for update_id, text in enumerate(("/recurring", "bank", "annual", "SGD 30",
+                                      "Annual bill", "15", "9"), 1):
+        send(update_id, text)
+    assert "month_of_year: 9" in persisted["pending_reply"]
+    send(8, "/confirm")
+    assert created == [({"account": "bank", "amount": "30", "description": "Annual bill",
+                         "cadence": "annual", "day_of_month": 15, "month_of_year": 9},
+                        "telegram-8")]
 
 
 def test_handler_rejects_group_or_mismatched_actor_without_backend_calls():

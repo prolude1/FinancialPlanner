@@ -13,7 +13,8 @@ from sqlalchemy import select
 from ..core import store
 from ..core.domain import apply, Invalid
 from ..core.finance import time_value
-from ..core.schemas import Login, TimeValue, TelegramLinkConfirm, validate_command
+from ..core.schemas import (Login, TimeValue, TelegramLinkConfirm, RecurringScheduleCreate,
+                            RecurringSchedulePatch, RecurringBotScheduleCreate, validate_command)
 from ..core.command_service import (
     CommandConflictError,
     CommandFieldsError,
@@ -22,9 +23,10 @@ from ..core.command_service import (
 )
 from ..core.stocks import StockProviderError, service as stock_service
 from ..core.ledger_service import FinancialLedgerService
-from ..core.views import dashboard, cashflow_summary
+from ..core.views import cashflow_summary
 from ..core import data_workbook
-from ..core import keycloak_identity, telegram_linking
+from ..core import keycloak_identity, telegram_linking, recurring as recurring_service
+from .dashboard_routes import DashboardQueryService, create_dashboard_router
 
 ledger_service = FinancialLedgerService(store)
 
@@ -315,27 +317,6 @@ def confirm_telegram_link(payload: TelegramLinkConfirm, request: Request, respon
         raise HTTPException(409, detail={"code": exc.code, "message": str(exc)}) from exc
 
 
-@app.post("/internal/bot/financial/dashboard")
-async def bot_financial_dashboard(request: Request, response: Response):
-    try:
-        body = await request.json()
-    except (ValueError, UnicodeDecodeError):
-        body = None
-    if not isinstance(body, dict) or set(body) != {"telegram_user_id", "telegram_chat_id"}:
-        raise HTTPException(422, detail={"code": "invalid_bot_request", "message": "Invalid private Telegram request"})
-    principal, telegram_user_id = linked_bot_principal(request, body)
-    try:
-        result = dashboard(
-            ledger_service.read(principal, telegram_user_id=telegram_user_id),
-            today(), actor="bot",
-        )
-    except PermissionError:
-        raise HTTPException(403, detail={"code": "telegram_not_linked", "message": "Link this private Telegram account to continue"}) from None
-    result["portfolio_history"] = ledger_service.portfolio_history(principal)
-    response.headers["Cache-Control"] = "no-store"
-    return result
-
-
 @app.post("/internal/bot/financial/command/{command}")
 async def bot_financial_command(command: str, request: Request):
     try:
@@ -397,6 +378,33 @@ async def bot_financial_state(request: Request, response: Response):
     except PermissionError:
         raise HTTPException(403, detail={"code": "telegram_not_linked", "message": "Link this private Telegram account to continue"}) from None
     return value
+
+
+@app.post("/internal/bot/financial/recurring-transactions", status_code=201)
+async def bot_create_recurring_transaction(request: Request, response: Response):
+    try:
+        raw = await request.json()
+        payload = RecurringBotScheduleCreate.model_validate(raw)
+    except Exception:
+        raise HTTPException(422, detail={"code": "invalid_recurring_schedule",
+            "message": "Provide a valid private Telegram recurring schedule request"}) from None
+    principal, telegram_user_id = linked_bot_principal(request, raw)
+    idempotency_key = request.headers.get("idempotency-key", "")
+    if not idempotency_key or len(idempotency_key) > 160:
+        raise HTTPException(422, detail={"code": "invalid_idempotency_key",
+            "message": "A valid Idempotency-Key header is required"})
+    try:
+        with ledger_service.transaction(principal, telegram_user_id=telegram_user_id) as state:
+            result = recurring_service.create_schedule(
+                state, payload.schedule.model_dump(), today(), actor="bot",
+                idempotency_key=idempotency_key)
+    except Invalid as exc:
+        raise HTTPException(422, detail={"code": "invalid_recurring_schedule", "message": str(exc)}) from exc
+    except PermissionError:
+        raise HTTPException(403, detail={"code": "telegram_not_linked",
+            "message": "Link this private Telegram account to continue"}) from None
+    response.headers["Cache-Control"] = "no-store"
+    return {"schedule": result}
 
 
 @app.post("/api/logout")
@@ -475,15 +483,6 @@ async def commit_data_import(request: Request):
         raise archive_error(exc) from exc
 
 
-@app.get("/api/dashboard")
-def get_dashboard(request: Request):
-    principal, actor = ledger_access(request)
-    snapshot = ledger_service.read(principal)
-    result = dashboard(snapshot, today(), actor=actor)
-    result["portfolio_history"] = ledger_service.portfolio_history(principal)
-    return result
-
-
 @app.get("/api/cashflow")
 def get_cashflow(request: Request, year: int | None = Query(default=None, ge=1970, le=9999)):
     principal, _ = ledger_access(request)
@@ -492,6 +491,60 @@ def get_cashflow(request: Request, year: int | None = Query(default=None, ge=197
         raise HTTPException(422, "Future calendar years are not available")
     snapshot = ledger_service.read(principal)
     return cashflow_summary(snapshot, current, year=year)
+
+
+@app.get("/api/recurring-transactions")
+def list_recurring_transactions(request: Request, response: Response):
+    principal = keycloak_principal(request)
+    snapshot = ledger_service.read(principal)
+    response.headers["Cache-Control"] = "no-store"
+    return {"as_of": str(today()), "schedules": recurring_service.list_schedules(snapshot)}
+
+
+@app.post("/api/recurring-transactions", status_code=201)
+def create_recurring_transaction(payload: RecurringScheduleCreate, request: Request, response: Response):
+    principal = keycloak_principal(request)
+    try:
+        with ledger_service.transaction(principal) as state:
+            idempotency_key = request.headers.get("idempotency-key")
+            schedule = recurring_service.create_schedule(state, payload.model_dump(), today(),
+                actor="web", idempotency_key=idempotency_key)
+    except Invalid as exc:
+        raise HTTPException(422, detail={"code": "invalid_recurring_schedule", "message": str(exc)}) from exc
+    response.headers["Cache-Control"] = "no-store"
+    return {"schedule": schedule}
+
+
+@app.patch("/api/recurring-transactions/{schedule_id}")
+def update_recurring_transaction(schedule_id: str, payload: RecurringSchedulePatch,
+                                 request: Request, response: Response):
+    principal = keycloak_principal(request)
+    try:
+        with ledger_service.transaction(principal) as state:
+            schedule = recurring_service.update_schedule(
+                state, schedule_id, payload.model_dump(exclude_unset=True), today())
+    except KeyError:
+        raise HTTPException(404, detail={"code": "recurring_schedule_not_found",
+            "message": "Recurring schedule not found"}) from None
+    except RuntimeError as exc:
+        raise HTTPException(409, detail={"code": "recurring_schedule_conflict", "message": str(exc)}) from exc
+    except Invalid as exc:
+        raise HTTPException(422, detail={"code": "invalid_recurring_schedule", "message": str(exc)}) from exc
+    response.headers["Cache-Control"] = "no-store"
+    return {"schedule": schedule}
+
+
+@app.delete("/api/recurring-transactions/{schedule_id}", status_code=200)
+def delete_recurring_transaction(schedule_id: str, request: Request, response: Response):
+    principal = keycloak_principal(request)
+    try:
+        with ledger_service.transaction(principal) as state:
+            schedule = recurring_service.delete_schedule(state, schedule_id)
+    except KeyError:
+        raise HTTPException(404, detail={"code": "recurring_schedule_not_found",
+            "message": "Recurring schedule not found"}) from None
+    response.headers["Cache-Control"] = "no-store"
+    return {"schedule": schedule}
 
 
 @app.post("/api/calculators/time-value")
@@ -562,3 +615,9 @@ async def mutate(command: str, request: Request):
         actor=actor,
         idempotency_key=request.headers.get("idempotency-key", ""),
     )
+
+
+dashboard_query_service = DashboardQueryService(ledger_service, today)
+app.include_router(create_dashboard_router(
+    dashboard_query_service, ledger_access, linked_bot_principal,
+))

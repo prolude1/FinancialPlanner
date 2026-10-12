@@ -106,7 +106,7 @@ def next_due(d, anchor_day):
 
 def empty():
     return {"accounts": {}, "credit_accounts": {}, "events": [], "loans": {}, "prices": {}, "fx": {},
-            "revision": 0, "receipts": {}, "bot": {"offset": 0, "session": None},
+            "revision": 0, "receipts": {}, "recurring_schedules": [], "bot": {"offset": 0, "session": None},
             "provider_status": {}}
 
 
@@ -135,50 +135,60 @@ def active_events(s, until):
                   key=lambda e: (e["date"], e["order"]))
 
 
+def new_replay_state():
+    """Create mutable balances for incrementally replaying chronological events."""
+    return defaultdict(Decimal), defaultdict(Decimal), {}, {}, {}
+
+
+def apply_replay_event(s, event, state):
+    """Apply one event using the same accounting and validation as :func:`replay`."""
+    cash, positions, instruments, reconciled, adjustments = state
+    p, kind = event["data"], event["kind"]
+    aid, cur = p.get("account"), p.get("currency")
+    if kind in ("opening_cash", "deposit", "withdraw"):
+        cash[aid, cur] += decimal(p["amount"]) * (-1 if kind == "withdraw" else 1)
+        if kind == "opening_cash" and s["accounts"][aid]["type"] == "cpf":
+            reconciled[aid] = event["date"]
+    elif kind == "cpf_set":
+        adjustments[event["id"]] = str(decimal(p["amount"]) - cash[aid, cur])
+        cash[aid, cur] = decimal(p["amount"])
+        reconciled[aid] = event["date"]
+    elif kind in ("buy", "sell", "opening_holding", "split"):
+        ins = instrument(p)
+        old = instruments.get(ins["id"])
+        if old and old != ins:
+            raise Invalid("Instrument class/currency conflicts with existing history")
+        instruments[ins["id"]] = ins
+        key = aid, ins["id"]
+        if kind == "split":
+            if not positions[key]:
+                raise Invalid("Cannot split an empty holding")
+            positions[key] *= decimal(p["ratio"], True)
+        else:
+            qty = decimal(p["quantity"], True)
+            positions[key] += qty * (-1 if kind == "sell" else 1)
+            if kind != "opening_holding":
+                cash[aid, cur] += qty * decimal(p["price"], True) * (1 if kind == "sell" else -1)
+    elif kind == "transfer":
+        cash[aid, cur] -= decimal(p["amount"], True)
+        cash[p["destination"], p["to_currency"]] += decimal(p["received"], True)
+    elif kind == "repayment":
+        for allocation in p["allocations"]:
+            cash[allocation["account"], "SGD"] -= decimal(allocation["amount"], True)
+    elif kind == "loan_disbursement":
+        cash[aid, "SGD"] += decimal(p["amount"], True)
+    elif kind == "credit_payment":
+        cash[p["funding_account"], "SGD"] -= decimal(p["amount"], True)
+    if any(v < 0 for v in cash.values()) or any(v < 0 for v in positions.values()):
+        raise Invalid(f"Insufficient cash or holdings at transaction {event['id']} ({event['date']}); check earlier entries")
+
+
 def replay(s, until=None):
     until = until or date.today()
-    cash, positions, instruments, reconciled = defaultdict(Decimal), defaultdict(Decimal), {}, {}
-    adjustments = {}
-    for e in active_events(s, until):
-        p, kind = e["data"], e["kind"]
-        aid, cur = p.get("account"), p.get("currency")
-        if kind in ("opening_cash", "deposit", "withdraw"):
-            cash[aid, cur] += decimal(p["amount"]) * (-1 if kind == "withdraw" else 1)
-            if kind == "opening_cash" and s["accounts"][aid]["type"] == "cpf":
-                reconciled[aid] = e["date"]
-        elif kind == "cpf_set":
-            adjustments[e["id"]] = str(decimal(p["amount"]) - cash[aid, cur])
-            cash[aid, cur] = decimal(p["amount"])
-            reconciled[aid] = e["date"]
-        elif kind in ("buy", "sell", "opening_holding", "split"):
-            ins = instrument(p)
-            old = instruments.get(ins["id"])
-            if old and old != ins:
-                raise Invalid("Instrument class/currency conflicts with existing history")
-            instruments[ins["id"]] = ins
-            key = aid, ins["id"]
-            if kind == "split":
-                if not positions[key]:
-                    raise Invalid("Cannot split an empty holding")
-                positions[key] *= decimal(p["ratio"], True)
-            else:
-                qty = decimal(p["quantity"], True)
-                positions[key] += qty * (-1 if kind == "sell" else 1)
-                if kind != "opening_holding":
-                    cash[aid, cur] += qty * decimal(p["price"], True) * (1 if kind == "sell" else -1)
-        elif kind == "transfer":
-            cash[aid, cur] -= decimal(p["amount"], True)
-            cash[p["destination"], p["to_currency"]] += decimal(p["received"], True)
-        elif kind == "repayment":
-            for allocation in p["allocations"]:
-                cash[allocation["account"], "SGD"] -= decimal(allocation["amount"], True)
-        elif kind == "loan_disbursement":
-            cash[aid, "SGD"] += decimal(p["amount"], True)
-        elif kind == "credit_payment":
-            cash[p["funding_account"], "SGD"] -= decimal(p["amount"], True)
-        if any(v < 0 for v in cash.values()) or any(v < 0 for v in positions.values()):
-            raise Invalid(f"Insufficient cash or holdings at transaction {e['id']} ({e['date']}); check earlier entries")
-    return cash, positions, instruments, reconciled, adjustments
+    state = new_replay_state()
+    for event in active_events(s, until):
+        apply_replay_event(s, event, state)
+    return state
 
 
 def credit_replay(s, until=None):
