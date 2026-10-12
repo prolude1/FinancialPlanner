@@ -5,9 +5,8 @@ const fmt = (v, digits=2) => v == null ? 'Unavailable' : Number(v).toLocaleStrin
 const labels = {cash:'Cash', equity:'Equities', etf:'ETFs', cpf:'CPF'};
 const colors = {cash:'#b9d291', equity:'#1f6152', etf:'#78a58d', cpf:'#e4d7ad'};
 let data, revision=-1, dataDate='', polling=false, lastLoaded=0, me=null;
-const chartState={};
 const PlannerAuth=globalThis.PlannerAuth||{configured:false,authenticated:false,request:async()=>{throw new Error('Keycloak sign-in is not configured.');},init:async()=>false,login:async()=>{},logout:async()=>{}};
-let dashboardPages, loanForms, recurringTransactions;
+let dashboardPages, loanForms, recurringTransactions, brokerageChartController;
 let recurringSchedules = null, recurringSchedulesLoading = false, recurringSchedulesError = '';
 let recurringSchedulesRequest = 0;
 
@@ -37,13 +36,16 @@ function empty(title, text){return `<div class="empty"><strong>${title}</strong>
 function accountName(id){ return data.accounts.find(a=>a.id===id)?.name || id; }
 function creditAccountName(id){ return data.credit_accounts?.find(a=>a.id===id)?.name || id; }
 async function initializeFeatures(){
-  const [{createDashboardPages},{createLoanForms}]=await Promise.all([
+  const [{createDashboardPages},{createLoanForms},{createBrokerageChartController}]=await Promise.all([
     import('./features/dashboard/dashboard-pages.js'),
     import('./features/loans/loan-forms.js'),
+    import('./features/dashboard/brokerage-chart-controller.js'),
   ]);
   const {recurringSchedulesPanel,recurringAmountForm}=await import('./features/recurring-transactions/recurring-transactions.js');
   recurringTransactions={recurringSchedulesPanel,recurringAmountForm};
-  dashboardPages=createDashboardPages({$,esc,fmt,labels,colors,chartState,badge,empty,historyTable,latestTransactionsFirst});
+  brokerageChartController=createBrokerageChartController({getData:()=>data,getDashboardPages:()=>dashboardPages,documentRef:document});
+  dashboardPages=createDashboardPages({$,esc,fmt,labels,colors,chartState:brokerageChartController.state,badge,empty,historyTable,latestTransactionsFirst});
+  brokerageChartController.attach();
   loanForms=createLoanForms({$,esc,fmt,input,openModal,formFooter,submitCommand});
 }
 function render(){
@@ -64,7 +66,7 @@ function render(){
   $('#content').innerHTML=page==='stocks'?stocksPage(id):page==='credit-cards'?dashboardPages.creditCardsPage(id):page==='accounts'?dashboardPages.accountsPage(id):page==='loans'?dashboardPages.loansPage():page==='calculator'?calculatorPage():page==='data-management'?backupPage():page==='activity'?activityPage():page==='recurring'?recurringTransactions.recurringSchedulesPanel({schedules:recurringSchedules||[],loading:recurringSchedulesLoading,error:recurringSchedulesError}):dashboardPages.overview();
   if(page==='recurring'&&recurringSchedules===null&&!recurringSchedulesLoading)loadRecurringSchedules();
   if(page==='activity'){if(bankCashflow)renderBankCashflow();else loadBankCashflow(bankCashflowYear);}
-  document.querySelectorAll('.brokerage-chart').forEach(chart=>dashboardPages.drawBrokerageChart(chart.dataset.account));
+  brokerageChartController.drawAll();
   if(focusedSearch){const input=$('#stock-search-input');input?.focus({preventScroll:true});if(input&&selection)input.setSelectionRange(selection.start,selection.end);}
 }
 async function loadRecurringSchedules(){
@@ -143,10 +145,8 @@ async function submitCommand(command,payload,form){
 }
 document.addEventListener('click',e=>{
   const b=e.target.closest('[data-action]');if(!b)return;
+  if(brokerageChartController?.handleAction(b))return;
   const action=b.dataset.action;
-  if(action==='chart-period'){const root=b.closest('.brokerage-chart'),rows=data.portfolio_history[root.dataset.account]||[],state=chartState[root.dataset.account];state.period=b.dataset.value;[state.start,state.end]=dashboardPages.historyRange(rows,state.period);dashboardPages.drawBrokerageChart(root.dataset.account);}
-  if(action==='chart-metric'){const root=b.closest('.brokerage-chart');chartState[root.dataset.account].metric=b.dataset.value;dashboardPages.drawBrokerageChart(root.dataset.account);}
-  if(action==='chart-projection'){const root=b.closest('.brokerage-chart'),state=chartState[root.dataset.account];state.showProjections=!state.showProjections;dashboardPages.drawBrokerageChart(root.dataset.account);}
   if(action==='stock-search')searchStocks();
   if(action==='backup-export')exportBackup();
   if(action==='backup-sample')downloadBackupTemplate();
@@ -206,11 +206,10 @@ document.addEventListener('keydown',e=>{
   const chart=e.target.closest?.('.candle-chart');if(chart&&(e.key==='ArrowLeft'||e.key==='ArrowRight')){e.preventDefault();const count=stockState.candles?.candles?.length||0,saved=chart.dataset.candleIndex!==undefined&&chart.dataset.candleIndex!==''?Number(chart.dataset.candleIndex):stockState.candleIndex,index=nextCandleIndex(saved,e.key,count);if(index!=null)selectCandle(chart,index,true);}else if(chart&&e.key==='Escape'){clearCandle(chart);chart.dataset.pinned='false';}
 });
 document.addEventListener('submit',e=>{if(e.target.id==='calculator-form'){e.preventDefault();calculateTimeValue(e.target);}});
-document.addEventListener('pointermove',e=>{if(e.target.matches('[data-action="chart-hover"]'))dashboardPages.chartHover(e);if(e.target.matches('[data-action="calculator-chart-hover"]'))calculatorChartHover(e);if(e.target.matches('[data-action="stock-candle-hover"]'))candleFromPointer(e,e.pointerType==='touch');});
+document.addEventListener('pointermove',e=>{if(e.target.matches('[data-action="calculator-chart-hover"]'))calculatorChartHover(e);if(e.target.matches('[data-action="stock-candle-hover"]'))candleFromPointer(e,e.pointerType==='touch');});
 document.addEventListener('pointerdown',e=>{if(e.target.matches('[data-action="calculator-chart-hover"]')){e.target.setPointerCapture?.(e.pointerId);calculatorChartHover(e);}if(e.target.matches('[data-action="stock-candle-hover"]')){if(e.pointerType==='touch')e.target.setPointerCapture?.(e.pointerId);candleFromPointer(e,true);}});
 document.addEventListener('pointerout',e=>{const chart=e.target.closest?.('.candle-chart');if(chart&&!chart.contains(e.relatedTarget)&&chart.dataset.pinned!=='true')clearCandle(chart);});
 document.addEventListener('click',e=>{if(!e.target.closest('.stock-search')&&stockState.suggestionsOpen){stockState.suggestionsOpen=false;stockState.highlight=-1;renderStockSearch();}});
-document.addEventListener('wheel',e=>{const root=e.target.closest?.('.brokerage-chart');if(!root)return;e.preventDefault();const rows=data.portfolio_history[root.dataset.account]||[],state=chartState[root.dataset.account],span=state.end-state.start+1;if(rows.length<2)return;const factor=(e.deltaY<0)?0.8:1.25,next=Math.min(rows.length,Math.max(2,Math.round(span*factor))),rect=root.querySelector('svg').getBoundingClientRect(),focus=Math.max(0,Math.min(1,(e.clientX-rect.left)/rect.width)),center=state.start+Math.round(focus*(span-1));state.start=Math.max(0,Math.min(rows.length-next,center-Math.round(focus*(next-1))));state.end=state.start+next-1;state.period='custom';dashboardPages.drawBrokerageChart(root.dataset.account);},{passive:false});
 $('#close-modal').onclick=()=>$('#modal').close();
 $('#keycloak-sign-in').onclick=async()=>{const button=$('#keycloak-sign-in');button.disabled=true;$('#login-error').textContent='';try{await PlannerAuth.login();}catch(error){$('#login-error').textContent=error.message||'Unable to start Keycloak sign-in.';button.disabled=false;}};
 $('#logout').onclick=async()=>{showLogin();try{await PlannerAuth.logout();}catch(error){$('#login-error').textContent=error.message||'Unable to sign out of Keycloak.';}};

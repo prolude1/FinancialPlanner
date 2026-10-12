@@ -2,10 +2,11 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 import uuid
 import pytest
+from app.core import worker
 from app.core.worker import completed_session, resolve_trading_currency, provider_symbol
 from app.core.worker import build_portfolio_deposit_history, build_portfolio_history, run_due
 from app.core.catalog import parse_us_catalog
-from app.core.domain import apply, empty
+from app.core.domain import Invalid, apply, empty
 
 
 def test_us_exchange_currency_is_deterministic_without_provider_lookup():
@@ -66,7 +67,65 @@ def test_brokerage_history_separates_cash_flow_from_investment_movement():
     assert rows[1]["adjusted_change_sgd"] == "17.6"
     deposits = build_portfolio_deposit_history(state,
         {"USD": {date(2026, 1, 2): Decimal("1.4")}}, date(2026, 1, 2))
-    assert deposits == [{"account": account, "date": "2026-01-02", "amount_sgd": "14.0"}]
+    assert deposits == [{"account": account, "date": "2026-01-02", "amount_sgd": "14.0",
+                         "missing_fx_count": 0}]
+
+
+def test_portfolio_history_replays_events_once_and_preserves_missing_market_data_gaps(monkeypatch):
+    state = empty()
+    first, second = date(2026, 1, 1), date(2026, 1, 2)
+    def run(command, payload, key):
+        return apply(state, command, payload, "test", key, second)
+    invested = run("account_add", {"name": "Invested", "type": "brokerage", "currency": "SGD"}, "a1")['id']
+    cash_only = run("account_add", {"name": "Cash only", "type": "brokerage", "currency": "SGD"}, "a2")['id']
+    run("opening_cash", {"account": invested, "currency": "SGD", "amount": "100", "date": str(first)}, "e1")
+    run("opening_cash", {"account": invested, "currency": "USD", "amount": "20", "date": str(first)}, "e2")
+    run("opening_holding", {"account": invested, "exchange": "NASDAQ", "symbol": "AAPL",
+        "asset_class": "equity", "currency": "USD", "quantity": "2", "price": "unknown",
+        "date": str(first)}, "e3")
+    run("deposit", {"account": invested, "currency": "SGD", "amount": "10", "date": str(second)}, "e4")
+    run("buy", {"account": invested, "exchange": "NASDAQ", "symbol": "AAPL",
+        "asset_class": "equity", "currency": "USD", "quantity": "1", "price": "5",
+        "date": str(second)}, "e5")
+    run("opening_cash", {"account": cash_only, "currency": "SGD", "amount": "5", "date": str(first)}, "e6")
+
+    calls = []
+    replay_event = worker.apply_replay_event
+    def count_replay(*args):
+        calls.append(args[1]['id'])
+        return replay_event(*args)
+    monkeypatch.setattr(worker, "apply_replay_event", count_replay)
+    rows = worker.build_portfolio_history(
+        state,
+        {"NASDAQ:AAPL": {second: Decimal("12")}},
+        {"USD": {first: Decimal("1.3"), second: Decimal("1.4")}},
+        second,
+    )
+
+    assert calls == [event["id"] for event in sorted(state["events"], key=lambda event: (event["date"], event["order"]))]
+    assert [(row["account"], row["date"], row["value_sgd"], row["gross_change_sgd"],
+             row["adjusted_change_sgd"], row["external_flow_sgd"]) for row in rows] == [
+        (cash_only, str(first), "5", None, None, "5"),
+        (invested, str(second), "181.4", None, None, "10"),
+        (cash_only, str(second), "5", "0", "0", "0"),
+    ]
+
+
+def test_portfolio_history_still_validates_events_before_market_data_is_complete():
+    state = empty()
+    first, second = date(2026, 1, 1), date(2026, 1, 2)
+    account = apply(state, "account_add", {"name": "Broker", "type": "brokerage"},
+                    "test", "account", second)["id"]
+    opening = apply(state, "opening_holding", {"account": account, "exchange": "NASDAQ",
+        "symbol": "AAPL", "asset_class": "equity", "currency": "USD", "quantity": "1",
+        "price": "unknown", "date": str(first)}, "test", "opening", second)
+    state["events"].append({"id": "invalid-buy", "kind": "buy", "date": str(second),
+        "order": opening["order"] + 1, "status": "active", "data": {
+            "account": account, "exchange": "NASDAQ", "symbol": "AAPL", "asset_class": "equity",
+            "currency": "USD", "quantity": "1", "price": "10", "date": str(second)}})
+
+    with pytest.raises(Invalid, match="Insufficient cash or holdings at transaction invalid-buy"):
+        worker.build_portfolio_history(state, {}, {}, second)
 
 
 def test_deposit_history_is_independent_of_prices_and_excludes_non_deposits():
@@ -78,7 +137,20 @@ def test_deposit_history_is_independent_of_prices_and_excludes_non_deposits():
     run("deposit", {"account": account, "currency": "SGD", "amount": "5000", "date": "2026-01-01"})
     run("withdraw", {"account": account, "currency": "SGD", "amount": "20", "date": "2026-01-02"})
     deposits = build_portfolio_deposit_history(state, {}, date(2026, 1, 2))
-    assert deposits == [{"account": account, "date": "2026-01-01", "amount_sgd": "5000"}]
+    assert deposits == [{"account": account, "date": "2026-01-01", "amount_sgd": "5000",
+                         "missing_fx_count": 0}]
+
+
+def test_deposit_projection_keeps_known_contributions_and_counts_missing_fx():
+    state = empty()
+    def run(command, payload):
+        return apply(state, command, payload, "test", uuid.uuid4().hex, date(2026, 1, 2))
+    account = run("account_add", {"name": "Broker", "type": "brokerage", "currency": "SGD"})["id"]
+    run("deposit", {"account": account, "currency": "SGD", "amount": "5", "date": "2026-01-01"})
+    run("deposit", {"account": account, "currency": "USD", "amount": "10", "date": "2026-01-01"})
+    deposits = build_portfolio_deposit_history(state, {}, date(2026, 1, 2))
+    assert deposits == [{"account": account, "date": "2026-01-01", "amount_sgd": "5",
+                         "missing_fx_count": 1}]
 
 
 def test_provider_schedule_backs_off_after_failure():

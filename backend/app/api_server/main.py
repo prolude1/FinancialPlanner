@@ -23,9 +23,10 @@ from ..core.command_service import (
 )
 from ..core.stocks import StockProviderError, service as stock_service
 from ..core.ledger_service import FinancialLedgerService
-from ..core.views import dashboard, cashflow_summary
+from ..core.views import cashflow_summary
 from ..core import data_workbook
 from ..core import keycloak_identity, telegram_linking, recurring as recurring_service
+from .dashboard_routes import DashboardQueryService, create_dashboard_router
 
 ledger_service = FinancialLedgerService(store)
 
@@ -316,28 +317,6 @@ def confirm_telegram_link(payload: TelegramLinkConfirm, request: Request, respon
         raise HTTPException(409, detail={"code": exc.code, "message": str(exc)}) from exc
 
 
-@app.post("/internal/bot/financial/dashboard")
-async def bot_financial_dashboard(request: Request, response: Response):
-    try:
-        body = await request.json()
-    except (ValueError, UnicodeDecodeError):
-        body = None
-    if not isinstance(body, dict) or set(body) != {"telegram_user_id", "telegram_chat_id"}:
-        raise HTTPException(422, detail={"code": "invalid_bot_request", "message": "Invalid private Telegram request"})
-    principal, telegram_user_id = linked_bot_principal(request, body)
-    try:
-        result = dashboard(
-            ledger_service.read(principal, telegram_user_id=telegram_user_id),
-            today(), actor="bot",
-        )
-    except PermissionError:
-        raise HTTPException(403, detail={"code": "telegram_not_linked", "message": "Link this private Telegram account to continue"}) from None
-    result["portfolio_history"] = ledger_service.portfolio_history(principal)
-    result["portfolio_deposits"] = ledger_service.portfolio_deposits(principal)
-    response.headers["Cache-Control"] = "no-store"
-    return result
-
-
 @app.post("/internal/bot/financial/command/{command}")
 async def bot_financial_command(command: str, request: Request):
     try:
@@ -504,16 +483,6 @@ async def commit_data_import(request: Request):
         raise archive_error(exc) from exc
 
 
-@app.get("/api/dashboard")
-def get_dashboard(request: Request):
-    principal, actor = ledger_access(request)
-    snapshot = ledger_service.read(principal)
-    result = dashboard(snapshot, today(), actor=actor)
-    result["portfolio_history"] = ledger_service.portfolio_history(principal)
-    result["portfolio_deposits"] = ledger_service.portfolio_deposits(principal)
-    return result
-
-
 @app.get("/api/cashflow")
 def get_cashflow(request: Request, year: int | None = Query(default=None, ge=1970, le=9999)):
     principal, _ = ledger_access(request)
@@ -646,3 +615,9 @@ async def mutate(command: str, request: Request):
         actor=actor,
         idempotency_key=request.headers.get("idempotency-key", ""),
     )
+
+
+dashboard_query_service = DashboardQueryService(ledger_service, today)
+app.include_router(create_dashboard_router(
+    dashboard_query_service, ledger_access, linked_bot_principal,
+))

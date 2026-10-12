@@ -152,7 +152,10 @@ def test_authentication_csrf_and_bot_scope(client):
     r = client.post("/api/login", json={"password": "test-password"}, headers={"Origin": "http://localhost:8080"})
     assert r.status_code == 200
     assert "httponly" in r.headers["set-cookie"].lower()
-    assert client.get("/api/dashboard").status_code == 200
+    dashboard = client.get("/api/dashboard")
+    assert dashboard.status_code == 200
+    assert "portfolio_history" in dashboard.json()
+    assert "portfolio_deposits" in dashboard.json()
     cashflow = client.get("/api/cashflow")
     assert cashflow.status_code == 200
     assert cashflow.json()["selection"]["type"] == "last_12_months"

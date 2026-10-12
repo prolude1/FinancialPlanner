@@ -1,5 +1,5 @@
 /** Dashboard rendering functions with explicit access to shared shell helpers. */
-import { BROKERAGE_RETURN_SCENARIOS, brokerageProjectionSeries } from './brokerage-projection.js';
+import { BROKERAGE_RETURN_SCENARIOS, brokerageProjectionDates, brokerageProjectionSeries } from './brokerage-projection.js';
 
 export function createDashboardPages(dependencies) {
   const { $, esc, fmt, labels, colors, chartState, badge, empty, historyTable, latestTransactionsFirst } = dependencies;
@@ -27,11 +27,14 @@ export function createDashboardPages(dependencies) {
   }
   function brokerageChart(account){
     const rows=data.portfolio_history?.[account.id]||[];
-    if(!rows.length)return `<div class="history-chart panel-inset">${empty('Historical chart is being prepared','The market worker will backfill daily prices and FX. Refresh after it finishes.')}</div>`;
-    if(!chartState[account.id]){const [start,end]=historyRange(rows,'3m');chartState[account.id]={period:'3m',metric:'value_sgd',start,end,showProjections:true};}
+    const deposits=data.portfolio_deposits?.[account.id]||[];
+    if(!rows.length&&!deposits.length)return `<div class="history-chart panel-inset">${empty('Historical chart is being prepared','The market worker will backfill daily prices and FX. Refresh after it finishes.')}</div>`;
+    if(!chartState[account.id]){const period=rows.length?'3m':'all',[start,end]=historyRange(rows,period);chartState[account.id]={period,metric:'value_sgd',start,end,showProjections:true};}
     const state=chartState[account.id];
+    if(!rows.length)state.period='all';
     if(state.showProjections===undefined)state.showProjections=true;
-    return `<div class="brokerage-chart" data-account="${esc(account.id)}"><p class="section-note">${esc(account.name)} only · Cash and holdings valued in SGD · ${rows.length} daily observations</p><div class="chart-toolbar"><div><button data-action="chart-metric" data-value="value_sgd">Total value</button><button data-action="chart-metric" data-value="gross_change_sgd">Daily movement</button><button data-action="chart-metric" data-value="adjusted_change_sgd">Investment movement</button></div><div><button data-action="chart-projection" aria-pressed="${state.showProjections}">Return scenarios</button><button data-action="chart-period" data-value="1m">1M</button><button data-action="chart-period" data-value="3m">3M</button><button data-action="chart-period" data-value="1y">1Y</button><button data-action="chart-period" data-value="all">All</button></div></div><div class="chart-plot"></div><p class="section-note">Projection lines compound brokerage deposits from their deposit dates at 5%, 10%, and 15% per year. Foreign-currency deposits use the exchange rate on their deposit date. Purchases, withdrawals, and current holdings values are excluded from the projection. Scroll over the graph to zoom; move the pointer to inspect a date.</p></div>`;
+    const periodButton=(period,label)=>`<button class="${state.period===period?'active':''}" data-action="chart-period" data-value="${period}" ${rows.length?'':'disabled'}>${label}</button>`;
+    return `<div class="brokerage-chart" data-account="${esc(account.id)}"><p class="section-note">${esc(account.name)} only · Cash and holdings valued in SGD · ${rows.length} daily valuation observations</p><div class="chart-toolbar"><div><button data-action="chart-metric" data-value="value_sgd">Total value</button><button data-action="chart-metric" data-value="gross_change_sgd" ${rows.length?'':'disabled'}>Daily movement</button><button data-action="chart-metric" data-value="adjusted_change_sgd" ${rows.length?'':'disabled'}>Investment movement</button></div><div><button data-action="chart-projection" aria-pressed="${state.showProjections}" ${rows.length?'':'disabled'}>Return scenarios</button>${periodButton('1m','1M')}${periodButton('3m','3M')}${periodButton('1y','1Y')}${periodButton('all','All')}</div></div><div class="chart-plot"></div><p class="section-note">Projection lines compound brokerage deposits from their deposit dates at 5%, 10%, and 15% per year. Foreign-currency deposits use the exchange rate on their deposit date. Purchases, withdrawals, and current holdings values are excluded from the projection. Move the pointer to inspect a date.</p></div>`;
   }
   function chartBounds(values){
     let min=Math.min(...values),max=Math.max(...values);
@@ -41,41 +44,50 @@ export function createDashboardPages(dependencies) {
   }
   function visibleProjection(rows,deposits,state){
     if(state.metric!=='value_sgd'||!state.showProjections)return null;
-    const series=brokerageProjectionSeries(rows,deposits);
-    return series.complete?series:null;
+    if(!Array.isArray(deposits))return null;
+    const shownRows=rows.slice(state.start,state.end+1);
+    const dates=brokerageProjectionDates(shownRows,deposits,{extendAfterLast:!rows.length||state.end===rows.length-1,throughDate:data.as_of});
+    const series=brokerageProjectionSeries(dates,deposits);
+    return series.available?series:null;
   }
   function drawBrokerageChart(accountId){
     const root=document.querySelector(`.brokerage-chart[data-account="${CSS.escape(accountId)}"]`);if(!root)return;
-    const rows=data.portfolio_history?.[accountId]||[],state=chartState[accountId];if(!rows.length||!state)return;
-    state.start=Math.max(0,Math.min(state.start,rows.length-1));state.end=Math.max(state.start,Math.min(state.end,rows.length-1));
+    const rows=data.portfolio_history?.[accountId]||[],state=chartState[accountId],deposits=data.portfolio_deposits?.[accountId];if(!state||(!rows.length&&!deposits?.length))return;
+    if(!rows.length){state.metric='value_sgd';state.showProjections=true;}
+    if(rows.length){state.start=Math.max(0,Math.min(state.start,rows.length-1));state.end=Math.max(state.start,Math.min(state.end,rows.length-1));}
     const shown=rows.slice(state.start,state.end+1),values=shown.map(r=>Number(r[state.metric]??0));
-    const deposits=data.portfolio_deposits?.[accountId];
-    const projection=visibleProjection(rows,deposits,state),shownProjections=projection?.values.slice(state.start,state.end+1)||[];
+    const projection=visibleProjection(rows,deposits,state),shownProjections=projection?.values||[];
+    const w=800,h=280,p={l:70,r:18,t:18,b:34};
+    const chartDates=projection?shownProjections.map(point=>point.date):shown.map(row=>row.date);
+    const chartStart=chartDates[0],chartEnd=chartDates.at(-1),firstTime=Date.parse(`${chartStart}T00:00:00Z`),lastTime=Date.parse(`${chartEnd}T00:00:00Z`);
+    const xForDate=date=>p.l+(firstTime===lastTime?0.5:(Date.parse(`${date}T00:00:00Z`)-firstTime)/(lastTime-firstTime))*(w-p.l-p.r);
     const plottedValues=values.concat(shownProjections.flatMap(point=>point.scenarios));
     let {min,max}=chartBounds(plottedValues);
     if(state.metric!=='value_sgd'){min=Math.min(min,0);max=Math.max(max,0);}
-    const w=800,h=280,p={l:70,r:18,t:18,b:34},x=i=>p.l+(shown.length===1?.5:(Date.parse(shown[i].date)-Date.parse(shown[0].date))/(Date.parse(shown.at(-1).date)-Date.parse(shown[0].date)))*(w-p.l-p.r),y=v=>p.t+(max-v)/(max-min)*(h-p.t-p.b);
-    const points=values.map((v,i)=>`${x(i)},${y(v)}`).join(' '),zero=state.metric==='value_sgd'?'':`<line class="chart-zero" x1="${p.l}" x2="${w-p.r}" y1="${y(0)}" y2="${y(0)}"/>`;
-    const scenarioLines=projection?BROKERAGE_RETURN_SCENARIOS.map((rate,scenarioIndex)=>`<polyline class="chart-line chart-projection-line chart-projection-${scenarioIndex}" points="${shownProjections.map((point,i)=>`${x(i)},${y(point.scenarios[scenarioIndex])}`).join(' ')}"/>`).join(''):'';
-    const legend=projection?`<div class="chart-legend"><span><i class="chart-legend-actual"></i>Account value</span>${BROKERAGE_RETURN_SCENARIOS.map((rate,index)=>`<span><i class="chart-legend-projection chart-projection-${index}"></i>${rate*100}% return</span>`).join('')}</div>`:'';
-    const projectionStatus=state.metric==='value_sgd'&&state.showProjections&&!projection?'<p class="chart-projection-status">Return projections will appear after brokerage history has refreshed.</p>':'';
-    root.querySelector('.chart-plot').innerHTML=`<svg viewBox="0 0 ${w} ${h}" role="img" aria-label="Brokerage value and deposit-based return projections"><line class="chart-axis" x1="${p.l}" x2="${p.l}" y1="${p.t}" y2="${h-p.b}"/><line class="chart-axis" x1="${p.l}" x2="${w-p.r}" y1="${h-p.b}" y2="${h-p.b}"/>${zero}${scenarioLines}<polyline class="chart-line chart-line-actual" points="${points}"/>${values.map((v,i)=>`<circle class="chart-point" cx="${x(i)}" cy="${y(v)}" r="3"/>`).join('')}<text x="${p.l}" y="${h-8}">${esc(shown[0].date)}</text><text text-anchor="end" x="${w-p.r}" y="${h-8}">${esc(shown.at(-1).date)}</text><text x="4" y="${p.t+5}">SGD ${fmt(max)}</text><text x="4" y="${h-p.b}">SGD ${fmt(min)}</text><line class="chart-cursor" hidden y1="${p.t}" y2="${h-p.b}"/><circle class="chart-point chart-hover-point" hidden r="4"/><rect class="chart-hit" data-action="chart-hover" x="${p.l}" y="${p.t}" width="${w-p.l-p.r}" height="${h-p.t-p.b}"/></svg>${legend}<div class="chart-tooltip" hidden></div>${projectionStatus}`;
+    const y=v=>p.t+(max-v)/(max-min)*(h-p.t-p.b);
+    const points=shown.map((row,i)=>`${xForDate(row.date)},${y(values[i])}`).join(' '),zero=state.metric==='value_sgd'?'':`<line class="chart-zero" x1="${p.l}" x2="${w-p.r}" y1="${y(0)}" y2="${y(0)}"/>`;
+    const scenarioLines=projection?BROKERAGE_RETURN_SCENARIOS.map((rate,scenarioIndex)=>`<polyline class="chart-line chart-projection-line chart-projection-${scenarioIndex}" points="${shownProjections.map(point=>`${xForDate(point.date)},${y(point.scenarios[scenarioIndex])}`).join(' ')}"/>`).join(''):'';
+    const legend=projection?`<div class="chart-legend">${rows.length?'<span><i class="chart-legend-actual"></i>Account value</span>':''}${BROKERAGE_RETURN_SCENARIOS.map((rate,index)=>`<span><i class="chart-legend-projection chart-projection-${index}"></i>${rate*100}% return</span>`).join('')}</div>`:'';
+    const projectionStatus=state.metric==='value_sgd'&&state.showProjections&&!projection?'<p class="chart-projection-status">Return projections will appear after brokerage history has refreshed.</p>':projection?.missingFxCount?`<p class="chart-projection-status">Historical FX is missing for ${projection.missingFxCount} deposit ${projection.missingFxCount===1?'contribution':'contributions'} on ${projection.missingFxDates.map(esc).join(', ')}. Converted contributions remain projected; amounts without an exchange rate are excluded.</p>`:'';
+    const valuationStatus=!rows.length?`<p class="chart-projection-status">No account valuation history is available. Deposit-based scenarios are shown through ${esc(chartEnd)}; actual account value is not estimated.</p>`:chartEnd>shown.at(-1).date?`<p class="chart-projection-status">Account value is available through ${esc(shown.at(-1).date)}. Later dates show deposit-based scenarios only; no account valuation is available.</p>`:'';
+    root.querySelector('.chart-plot').innerHTML=`<svg viewBox="0 0 ${w} ${h}" role="img" aria-label="Brokerage value and deposit-based return projections"><line class="chart-axis" x1="${p.l}" x2="${p.l}" y1="${p.t}" y2="${h-p.b}"/><line class="chart-axis" x1="${p.l}" x2="${w-p.r}" y1="${h-p.b}" y2="${h-p.b}"/>${zero}${scenarioLines}${rows.length?`<polyline class="chart-line chart-line-actual" points="${points}"/>${values.map((v,i)=>`<circle class="chart-point" cx="${xForDate(shown[i].date)}" cy="${y(v)}" r="3"/>`).join('')}`:''}<text x="${p.l}" y="${h-8}">${esc(chartStart)}</text><text text-anchor="end" x="${w-p.r}" y="${h-8}">${esc(chartEnd)}</text><text x="4" y="${p.t+5}">SGD ${fmt(max)}</text><text x="4" y="${h-p.b}">SGD ${fmt(min)}</text><line class="chart-cursor" hidden y1="${p.t}" y2="${h-p.b}"/><circle class="chart-point chart-hover-point" hidden r="4"/><rect class="chart-hit" data-action="chart-hover" x="${p.l}" y="${p.t}" width="${w-p.l-p.r}" height="${h-p.t-p.b}"/></svg>${legend}<div class="chart-tooltip" hidden></div>${projectionStatus}${valuationStatus}`;
     root.querySelectorAll('[data-action="chart-period"]').forEach(b=>b.classList.toggle('active',b.dataset.value===state.period));
     root.querySelectorAll('[data-action="chart-metric"]').forEach(b=>b.classList.toggle('active',b.dataset.value===state.metric));
     const projectionButton=root.querySelector('[data-action="chart-projection"]');
     projectionButton.classList.toggle('active',state.showProjections);
-    projectionButton.disabled=state.metric!=='value_sgd';
+    projectionButton.disabled=!rows.length||state.metric!=='value_sgd';
     projectionButton.setAttribute('aria-pressed',String(state.showProjections));
   }
   function chartHover(event){
     const root=event.target.closest('.brokerage-chart'),svg=event.target.closest('svg');if(!root||!svg)return;
-    const rows=data.portfolio_history[root.dataset.account]||[],deposits=data.portfolio_deposits?.[root.dataset.account],state=chartState[root.dataset.account],shown=rows.slice(state.start,state.end+1),box=svg.getBoundingClientRect();
-    const ratio=Math.max(0,Math.min(1,((event.clientX-box.left)/box.width*800-70)/(800-70-18))),first=Date.parse(shown[0].date),last=Date.parse(shown.at(-1).date),target=first+ratio*(last-first),index=shown.reduce((best,row,i)=>Math.abs(Date.parse(row.date)-target)<Math.abs(Date.parse(shown[best].date)-target)?i:best,0),row=shown[index],value=Number(row[state.metric]??0);
-    const x=70+(shown.length===1?.5:(Date.parse(row.date)-first)/(last-first))*(800-70-18);
-    const projection=visibleProjection(rows,deposits,state),shownProjections=projection?.values.slice(state.start,state.end+1)||[],vals=shown.map(r=>Number(r[state.metric]??0)).concat(shownProjections.flatMap(item=>item.scenarios));let {min,max}=chartBounds(vals);if(state.metric!=='value_sgd'){min=Math.min(min,0);max=Math.max(max,0);}const y=18+(max-value)/(max-min)*(280-18-34);
-    const cursor=svg.querySelector('.chart-cursor'),point=svg.querySelector('.chart-hover-point'),tip=root.querySelector('.chart-tooltip');cursor.removeAttribute('hidden');point.removeAttribute('hidden');cursor.setAttribute('x1',x);cursor.setAttribute('x2',x);point.setAttribute('cx',x);point.setAttribute('cy',y);tip.hidden=false;tip.style.left=`${ratio*100}%`;
-    const projectionValues=projection&&state.metric==='value_sgd'?`<span>5%: SGD ${fmt(shownProjections[index].scenarios[0])}</span><span>10%: SGD ${fmt(shownProjections[index].scenarios[1])}</span><span>15%: SGD ${fmt(shownProjections[index].scenarios[2])}</span>`:'';
-    tip.innerHTML=`<strong>${esc(row.date)}</strong><span>Account: SGD ${fmt(value)}</span>${projectionValues}`;
+    const rows=data.portfolio_history[root.dataset.account]||[],deposits=data.portfolio_deposits?.[root.dataset.account],state=chartState[root.dataset.account],shown=rows.slice(state.start,state.end+1),projection=visibleProjection(rows,deposits,state),shownProjections=projection?.values||[],chartDates=projection?shownProjections.map(item=>item.date):shown.map(row=>row.date),box=svg.getBoundingClientRect();
+    const ratio=Math.max(0,Math.min(1,((event.clientX-box.left)/box.width*800-70)/(800-70-18))),first=Date.parse(`${chartDates[0]}T00:00:00Z`),last=Date.parse(`${chartDates.at(-1)}T00:00:00Z`),target=first+ratio*(last-first),date=chartDates.reduce((best,candidate)=>Math.abs(Date.parse(`${candidate}T00:00:00Z`)-target)<Math.abs(Date.parse(`${best}T00:00:00Z`)-target)?candidate:best,chartDates[0]),row=shown.find(item=>item.date===date),projectionPoint=shownProjections.find(item=>item.date===date),value=row?Number(row[state.metric]??0):null;
+    const x=70+(first===last?0.5:(Date.parse(`${date}T00:00:00Z`)-first)/(last-first))*(800-70-18);
+    const vals=shown.map(r=>Number(r[state.metric]??0)).concat(shownProjections.flatMap(item=>item.scenarios));let {min,max}=chartBounds(vals);if(state.metric!=='value_sgd'){min=Math.min(min,0);max=Math.max(max,0);}const y=value==null?null:18+(max-value)/(max-min)*(280-18-34);
+    const cursor=svg.querySelector('.chart-cursor'),point=svg.querySelector('.chart-hover-point'),tip=root.querySelector('.chart-tooltip');cursor.removeAttribute('hidden');cursor.setAttribute('x1',x);cursor.setAttribute('x2',x);if(value==null){point.setAttribute('hidden','');}else{point.removeAttribute('hidden');point.setAttribute('cx',x);point.setAttribute('cy',y);}tip.hidden=false;tip.style.left=`${ratio*100}%`;
+    const accountValue=row?`<span>Account: SGD ${fmt(value)}</span>`:'<span>Account valuation unavailable for this date</span>';
+    const projectionValues=projectionPoint&&state.metric==='value_sgd'?`<span>5%: SGD ${fmt(projectionPoint.scenarios[0])}</span><span>10%: SGD ${fmt(projectionPoint.scenarios[1])}</span><span>15%: SGD ${fmt(projectionPoint.scenarios[2])}</span>`:'';
+    tip.innerHTML=`<strong>${esc(date)}</strong>${accountValue}${projectionValues}`;
   }
   function summary(){return `<div class="summary-grid"><div class="summary-card primary"><div class="summary-label">Net worth <span>↗</span></div><div class="summary-value"><small>SGD</small>${fmt(data.net_worth)}</div><div class="summary-foot">${data.complete?'Assets less outstanding liabilities':'Partial value · missing valuations'}</div></div><div class="summary-card"><div class="summary-label">Total assets <span>◫</span></div><div class="summary-value"><small>SGD</small>${fmt(data.assets)}</div><div class="summary-foot">Across ${data.accounts.filter(a=>!a.archived).length} accounts${data.complete?'':' · incomplete'}</div></div><div class="summary-card"><div class="summary-label">Total liabilities <span>↙</span></div><div class="summary-value"><small>SGD</small>${fmt(data.liabilities)}</div><div class="summary-foot">Principal + accrued unpaid interest</div></div></div>`;}
   function allocation(){

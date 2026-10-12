@@ -1,11 +1,14 @@
 from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor
+from hashlib import sha256
+import importlib
 from io import BytesIO
 from pathlib import Path
 import zipfile
 
 import pytest
 from openpyxl import load_workbook
-from sqlalchemy import create_engine, insert, select
+from sqlalchemy import create_engine, delete, insert, select
 
 from app.core import store
 from app.core import data_workbook as workbook
@@ -16,8 +19,9 @@ def isolated_db(tmp_path, monkeypatch):
     engine = create_engine("sqlite:///" + str(tmp_path / "workbook.db"))
     monkeypatch.setattr(store, "engine", engine)
     monkeypatch.setenv("DATA_ROLLBACK_DIR", str(tmp_path / "rollback"))
-    workbook._confirmations.clear()
     store.migrate()
+    with engine.begin() as connection:
+        connection.execute(delete(store.workbook_confirmations))
     yield engine
     engine.dispose()
 
@@ -80,6 +84,77 @@ def test_template_is_synthetic_and_import_preview_warns(isolated_db):
     assert preview["sample_data"] and preview["importable"] and preview["confirmation_token"]
     assert any("synthetic sample data" in warning for warning in preview["warnings"])
     assert any("replaces current records" in warning for warning in preview["warnings"])
+
+
+def test_confirmation_is_database_backed_hashed_and_survives_module_reload(isolated_db):
+    seed_tables()
+    content, _ = workbook.snapshot_bytes()
+    preview = workbook.validate_workbook(content)
+    workbook.validate_workbook(content)
+    token_hash = sha256(preview["confirmation_token"].encode("utf-8")).hexdigest()
+    with isolated_db.connect() as connection:
+        pending = connection.execute(select(store.workbook_confirmations).where(
+            store.workbook_confirmations.c.token_hash == token_hash)).mappings().one()
+    assert preview["confirmation_token"] != pending["token_hash"]
+    assert bytes(pending["workbook_bytes"]) == content
+    assert pending["principal"] is None
+    assert pending["expires_at"] - int(datetime.now(timezone.utc).timestamp()) <= 600
+
+    # A module reload models an API process that has no in-memory preview state.
+    with isolated_db.connect() as connection:
+        assert len(connection.execute(select(store.workbook_confirmations)).all()) == 2
+    importlib.reload(workbook)
+    result = workbook.commit_import(preview["archive_sha256"], preview["current_revision"],
+                                   preview["current_etag"], preview["confirmation_token"])
+    assert result["status"] == "committed"
+    with isolated_db.connect() as connection:
+        assert connection.execute(select(store.workbook_confirmations)).first() is not None
+    with pytest.raises(workbook.WorkbookError, match="invalid, expired, or already used"):
+        workbook.commit_import(preview["archive_sha256"], preview["current_revision"],
+                               preview["current_etag"], preview["confirmation_token"])
+
+
+def test_confirmation_is_single_use_under_concurrent_commits(isolated_db):
+    content, _ = workbook.snapshot_bytes()
+    preview = workbook.validate_workbook(content)
+
+    def commit():
+        try:
+            workbook.commit_import(preview["archive_sha256"], preview["current_revision"],
+                                  preview["current_etag"], preview["confirmation_token"])
+            return "committed"
+        except workbook.WorkbookError:
+            return "rejected"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _index: commit(), range(2)))
+    assert sorted(results) == ["committed", "rejected"]
+
+
+def test_pending_confirmation_capacity_evicts_oldest_preview(isolated_db):
+    content, _ = workbook.snapshot_bytes()
+    previews = [workbook.validate_workbook(content) for _ in range(workbook.MAX_PENDING_CONFIRMATIONS + 1)]
+    with isolated_db.connect() as connection:
+        assert len(connection.execute(select(store.workbook_confirmations)).all()) == workbook.MAX_PENDING_CONFIRMATIONS
+    with pytest.raises(workbook.WorkbookError, match="invalid, expired, or already used"):
+        workbook.commit_import(previews[0]["archive_sha256"], previews[0]["current_revision"],
+                               previews[0]["current_etag"], previews[0]["confirmation_token"])
+
+
+def test_expired_confirmation_is_deleted_and_cannot_be_consumed(isolated_db):
+    content, _ = workbook.snapshot_bytes()
+    preview = workbook.validate_workbook(content)
+    token_hash = sha256(preview["confirmation_token"].encode("utf-8")).hexdigest()
+    with isolated_db.begin() as connection:
+        connection.execute(store.workbook_confirmations.update().where(
+            store.workbook_confirmations.c.token_hash == token_hash).values(
+                expires_at=int(datetime.now(timezone.utc).timestamp()) - 1))
+    with pytest.raises(workbook.WorkbookError, match="invalid, expired, or already used"):
+        workbook.commit_import(preview["archive_sha256"], preview["current_revision"],
+                               preview["current_etag"], preview["confirmation_token"])
+    with isolated_db.connect() as connection:
+        assert connection.execute(select(store.workbook_confirmations).where(
+            store.workbook_confirmations.c.token_hash == token_hash)).first() is None
 
 
 def test_legacy_workbook_without_recurring_schedules_remains_importable():

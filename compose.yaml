@@ -100,11 +100,18 @@ services:
         condition: service_healthy
   worker:
     <<: *backend
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
     environment:
       <<: *environment
       MARKET_POLL_SECONDS: ${MARKET_POLL_SECONDS:-900}
       CATALOG_REFRESH_SECONDS: ${CATALOG_REFRESH_SECONDS:-86400}
       HISTORY_REFRESH_SECONDS: ${HISTORY_REFRESH_SECONDS:-21600}
+      DEPOSIT_HISTORY_REFRESH_SECONDS: ${DEPOSIT_HISTORY_REFRESH_SECONDS:-0}
+      WORKER_LOG_LEVEL: ${WORKER_LOG_LEVEL:-INFO}
       STOCK_PRICE_PROVIDER: ${STOCK_PRICE_PROVIDER:-yahoo}
     command: [python, -m, app.core.worker]
     depends_on:

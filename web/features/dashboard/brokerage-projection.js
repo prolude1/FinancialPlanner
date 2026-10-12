@@ -26,15 +26,57 @@ export function elapsedCalendarYears(startDate, endDate) {
   return wholeYears + fraction;
 }
 
-/** Project only date-stamped deposit contributions; other ledger activity is ignored. */
+/**
+ * Add projection-only deposit dates to valuation dates. Deposits after the final
+ * valuation can extend the chart timeline without implying an account value.
+ */
+export function brokerageProjectionDates(rows, deposits, { extendAfterLast = false, throughDate = null } = {}) {
+  if (!Array.isArray(deposits)) return [];
+  if (!rows.length) {
+    const dates = new Set(deposits.map(deposit => deposit.date)
+      .filter(date => date && (!throughDate || date <= throughDate)));
+    if (!dates.size) return [];
+    const firstDate = [...dates].sort()[0];
+    if (throughDate && throughDate >= firstDate) dates.add(throughDate);
+    return [...dates].sort().map(date => ({ date }));
+  }
+  const firstDate = rows[0].date;
+  const lastDate = rows.at(-1).date;
+  const dates = new Set(rows.map(row => row.date));
+  for (const deposit of deposits) {
+    if (deposit.date >= firstDate && (!throughDate || deposit.date <= throughDate) &&
+        (deposit.date <= lastDate || extendAfterLast)) {
+      dates.add(deposit.date);
+    }
+  }
+  if (extendAfterLast && throughDate && throughDate > lastDate) dates.add(throughDate);
+  return [...dates].sort().map(date => ({ date }));
+}
+
+/** Project converted deposit contributions; unconverted FX amounts are excluded and disclosed. */
 export function brokerageProjectionSeries(rows, deposits, rates = BROKERAGE_RETURN_SCENARIOS) {
-  if (!rows.length || !Array.isArray(deposits) || deposits.some(deposit => deposit.amount_sgd == null)) {
-    return { complete: false, values: [] };
+  if (!rows.length || !Array.isArray(deposits)) {
+    return { available: false, complete: false, missingFxCount: 0, missingFxDates: [], values: [] };
   }
 
-  const contributions = deposits
-    .filter(deposit => Number(deposit.amount_sgd) > 0)
-    .map(deposit => ({ date: deposit.date, amount: Number(deposit.amount_sgd) }));
+  let missingFxCount = 0;
+  const missingFxDates = new Set();
+  const contributions = [];
+  for (const deposit of deposits) {
+    const amount = deposit.amount_sgd == null ? null : Number(deposit.amount_sgd);
+    const missingCount = Number.isFinite(Number(deposit.missing_fx_count))
+      ? Math.max(0, Math.floor(Number(deposit.missing_fx_count)))
+      : (deposit.missing_fx || amount == null ? 1 : 0);
+    if (missingCount) {
+      missingFxCount += missingCount;
+      missingFxDates.add(deposit.date);
+    }
+    if (amount == null) continue;
+    if (!Number.isFinite(amount)) {
+      return { available: false, complete: false, missingFxCount, missingFxDates: [...missingFxDates].sort(), values: [] };
+    }
+    if (amount > 0) contributions.push({ date: deposit.date, amount });
+  }
 
   const values = rows.map(row => ({
     date: row.date,
@@ -44,5 +86,11 @@ export function brokerageProjectionSeries(rows, deposits, rates = BROKERAGE_RETU
     }, 0)),
   }));
 
-  return { complete: true, values };
+  return {
+    available: true,
+    complete: missingFxCount === 0,
+    missingFxCount,
+    missingFxDates: [...missingFxDates].sort(),
+    values,
+  };
 }

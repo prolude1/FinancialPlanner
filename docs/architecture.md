@@ -58,7 +58,7 @@ Keycloak is the identity boundary for financial APIs. `GET /api/me` returns only
 
 The one-time legacy claim code is issued by a trusted local operator with `python scripts/issue_legacy_claim.py` while `DATABASE_URL` points at the intended application DB. The code is 256-bit random, valid for ten minutes, stored only as SHA-256, printed once, and must be delivered out-of-band. Redeem with `POST /api/owner-claim`, a Keycloak bearer, and exactly `{"code":"..."}` in the JSON body. Success is `{"status":"claimed"}`. All invalid, expired, replayed, nonempty-tenant/history, and already-claimed cases return the same generic HTTP 400. A pristine empty tenant created by sign-in can be claimed. A database lock makes the claim single-use and atomic: it copies the legacy aggregate and derived history to the verified principal, consumes the code, sets an immutable claim marker, and resets the unassigned legacy ledger/history. Code values must not be placed in URLs, logs, shell arguments, or browser storage.
 
-For multi-user Telegram finance, the bot's separate `BOT_API_SECRET` authenticates the bot service only; it is not a financial owner identity. `POST /internal/bot/financial/dashboard` accepts `{telegram_user_id,telegram_chat_id}`; `POST /internal/bot/financial/command/{command}` accepts the same IDs plus the existing domain `payload`; and `POST /internal/bot/financial/state` accepts those IDs plus `action: get|set|clear`. A `set` may include any subset of `session`, `pending_reply`, `pending_markup`, or `last_tvm`; `get` returns all four and `clear` resets all four. The API requires a private-chat ID match and resolves the linked sender through `telegram_connections` to the tenant. Unlinked senders receive a generic 403; there is no fallback to legacy data. Per-sender conversation/reply state is keyed by both principal and Telegram sender in `telegram_user_state`; state is cleared transactionally on unlink and link confirmation so it cannot cross an identity change. Telegram's polling offset stays in singleton `bot_runtime` and never appears in tenant ledgers.
+For multi-user Telegram finance, the bot's separate `BOT_API_SECRET` authenticates the bot service only; it is not a financial owner identity. `POST /internal/bot/financial/dashboard` accepts `{telegram_user_id,telegram_chat_id}` and returns the bot's dashboard data without portfolio history or deposit projections; `POST /internal/bot/financial/command/{command}` accepts the same IDs plus the existing domain `payload`; and `POST /internal/bot/financial/state` accepts those IDs plus `action: get|set|clear`. A `set` may include any subset of `session`, `pending_reply`, `pending_markup`, or `last_tvm`; `get` returns all four and `clear` resets all four. The API requires a private-chat ID match and resolves the linked sender through `telegram_connections` to the tenant. Unlinked senders receive a generic 403; there is no fallback to legacy data. Per-sender conversation/reply state is keyed by both principal and Telegram sender in `telegram_user_state`; state is cleared transactionally on unlink and link confirmation so it cannot cross an identity change. Telegram's polling offset stays in singleton `bot_runtime` and never appears in tenant ledgers.
 
 The dashboard at `/` and the separate Telegram-link page at `/telegram-link.html` use the pinned official `keycloak-js` adapter with Authorization Code and PKCE S256. Runtime public configuration (`KEYCLOAK_ISSUER`, `KEYCLOAK_REALM`, `KEYCLOAK_WEB_CLIENT_ID`) is served through `/runtime-config.js`; the client ID and issuer are public values and no client secret is shipped. The web CSP permits the configured Keycloak origin for adapter network requests. The Telegram-link page remains isolated from the dashboard bundle; both pages send access tokens as Bearer credentials without relying on the legacy session. Keycloak initialization errors are shown directly; neither page falls back to the local password login.
 
@@ -99,6 +99,10 @@ The `instrument_catalog` relational table is separate from the locked ledger JSO
 
 The derived `tenant_portfolio_history` table stores each tenant's daily brokerage value, raw change, external flow, and cash-flow-adjusted change in SGD; `portfolio_history` remains for the unclaimed legacy ledger. The worker rebuilds each principal separately from its event history plus historical close and FX series. These snapshots can be regenerated without changing financial ledgers. Missing historical price or FX data suppresses incomplete account-day snapshots rather than treating an asset as zero.
 
+Separate `tenant_portfolio_deposit_history` and `portfolio_deposit_history` tables hold dated brokerage deposit contributions for the return-scenario chart. This job uses deposit events and historical FX only, so a historical stock-price outage cannot block it. For each date, the stored SGD amount includes deposits with usable FX, and `missing_fx_count` records deposits omitted because their historical rate was unavailable. The chart presents those scenarios as partial and labels the missing FX dates; it does not invent an account valuation for later deposit-only dates.
+
+Brokerage valuation history and deposit-based return scenarios are implemented in the browser dashboard. When the legacy ledger is claimed, its valuation history and deposit projection cache move to the owner's tenant together with the ledger; the legacy rows are then cleared. The worker can rebuild both derived histories from ledger events.
+
 The `stock_cache` table stores normalized successful Stocks query responses by
 canonical security ID and response kind. Provider calls occur outside ledger
 transactions. Fresh entries avoid repeat calls; expired entries remain available
@@ -115,11 +119,20 @@ path and preserves Telegram link checks. `verified_keycloak_principal()` is
 storage-free; routes that read or write a ledger provision it through the
 service once. Other authenticated routes keep `keycloak_principal()` so their
 existing first-request tenant provisioning behavior is unchanged. The browser
+and Telegram dashboard endpoints live in `api_server/dashboard_routes.py`.
+Its `DashboardQueryService` reads the selected ledger once and assembles the
+dashboard view for both routes. Only the browser route adds portfolio valuations
+and deposit projections.
+The router receives the existing authentication helpers from `main.py`, so
+identity policy remains at the API boundary. The browser
 uses `web/core/api-client.js` for authenticated API transport and JSON error
 decoding; feature code continues to call the shared `api()` adapter in
 `web/app.js`. Browser screen code and its styles live under
 `web/features/{activity,calculator,cashflow,dashboard,data-management,loans,stocks}`; Nginx
-serves these files from their feature paths.
+serves these files from their feature paths. `web/features/dashboard/brokerage-chart-controller.js`
+owns brokerage chart state, actions, hover, and zoom. `dashboard-pages.js`
+renders the chart, while `web/app.js` initializes the controller and asks it to
+redraw charts after a page render.
 
 Both browser and Telegram financial commands use `FinancialCommandService` in
 `core/command_service.py` for schema validation, ledger transactions, and
@@ -203,7 +216,7 @@ The worker waits 30 minutes after a session closes, chooses only daily rows date
 
 Quote/FX refreshes, US catalogue refreshes, and brokerage-history rebuilds have independent schedules and failure boundaries. A provider failure cannot prevent the other jobs from running. Failed scheduled jobs retain prior data and wait for their full configured interval before retrying.
 
-Prices refresh on startup and the periodic cycle; recording a new symbol may therefore wait until the next cycle for its first price. Historical portfolio performance and historical FX valuation are not implemented. The latest OHLC cache is not a full market-data warehouse.
+Prices refresh on startup and the periodic cycle; recording a new symbol may therefore wait until the next cycle for its first price. Brokerage history uses historical daily closes and FX rates, and deposit scenarios refresh independently on each worker poll by default. The latest OHLC cache is not a full market-data warehouse.
 
 ## HDB interest and schedules
 
