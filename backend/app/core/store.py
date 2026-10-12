@@ -493,7 +493,7 @@ def create_workbook_confirmation(token_hash, principal, workbook_sha256, current
     """Persist a bounded preview record, evicting the oldest pending rows as needed."""
     with engine.begin() as c:
         lock_application(c)
-        c.execute(delete(workbook_confirmations).where(workbook_confirmations.c.expires_at < now))
+        _delete_expired_workbook_confirmations(c, now)
         while True:
             count, byte_count = c.execute(select(
                 func.count(), func.coalesce(func.sum(func.length(workbook_confirmations.c.workbook_bytes)), 0)
@@ -510,6 +510,19 @@ def create_workbook_confirmation(token_hash, principal, workbook_sha256, current
             token_hash=token_hash, principal=principal, workbook_sha256=workbook_sha256,
             current_revision=current_revision, current_etag=current_etag,
             created_at=created_at, expires_at=expires_at, workbook_bytes=workbook_bytes))
+
+
+def _delete_expired_workbook_confirmations(connection, now):
+    result = connection.execute(delete(workbook_confirmations).where(
+        workbook_confirmations.c.expires_at < now))
+    return max(result.rowcount or 0, 0)
+
+
+def delete_expired_workbook_confirmations(now):
+    """Atomically remove expired upload previews across legacy and tenant scopes."""
+    with engine.begin() as c:
+        lock_application(c)
+        return _delete_expired_workbook_confirmations(c, now)
 
 
 def consume_workbook_confirmation(token_hash, principal, now):

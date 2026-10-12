@@ -527,30 +527,38 @@ def run_due(last_attempt, interval, action, label, now=None):
 
 def main():
     from .catalog import refresh_us_catalog
+    from .maintenance import ExpiredWorkbookConfirmationCleaner
     logging.basicConfig(level="WARNING")
     logging.getLogger().setLevel(logging.WARNING)
     for logger_name in ("httpx", "httpcore", "yfinance", "urllib3", "requests"):
         logging.getLogger(logger_name).setLevel(logging.WARNING)
     worker_logger.setLevel(os.environ.get("WORKER_LOG_LEVEL", "INFO").upper())
+    logging.getLogger("financial_planner.maintenance").setLevel(
+        os.environ.get("WORKER_LOG_LEVEL", "INFO").upper())
     last_catalog_refresh = 0
     last_history_refresh = 0
     last_deposit_history_refresh = 0
-    while True:
-        last_catalog_refresh = run_due(last_catalog_refresh,
-            int(os.environ.get("CATALOG_REFRESH_SECONDS", "86400")),
-            refresh_us_catalog, "US catalogue refresh")
-        try:
-            refresh_all_ledgers()
-        except Exception as exc:
-            log_worker_failure(worker_logger, "market-refresh", exc)
-        recurring_transaction_worker.run()
-        last_history_refresh = run_due(last_history_refresh,
-            int(os.environ.get("HISTORY_REFRESH_SECONDS", "21600")),
-            refresh_all_portfolio_history, "Brokerage history refresh")
-        last_deposit_history_refresh = run_due(last_deposit_history_refresh,
-            int(os.environ.get("DEPOSIT_HISTORY_REFRESH_SECONDS", "0")),
-            refresh_all_portfolio_deposit_history, "Brokerage deposit history refresh")
-        time.sleep(max(60, int(os.environ.get("MARKET_POLL_SECONDS", "900"))))
+    confirmation_cleaner = ExpiredWorkbookConfirmationCleaner()
+    confirmation_cleaner.start()
+    try:
+        while True:
+            last_catalog_refresh = run_due(last_catalog_refresh,
+                int(os.environ.get("CATALOG_REFRESH_SECONDS", "86400")),
+                refresh_us_catalog, "US catalogue refresh")
+            try:
+                refresh_all_ledgers()
+            except Exception as exc:
+                log_worker_failure(worker_logger, "market-refresh", exc)
+            recurring_transaction_worker.run()
+            last_history_refresh = run_due(last_history_refresh,
+                int(os.environ.get("HISTORY_REFRESH_SECONDS", "21600")),
+                refresh_all_portfolio_history, "Brokerage history refresh")
+            last_deposit_history_refresh = run_due(last_deposit_history_refresh,
+                int(os.environ.get("DEPOSIT_HISTORY_REFRESH_SECONDS", "0")),
+                refresh_all_portfolio_deposit_history, "Brokerage deposit history refresh")
+            time.sleep(max(60, int(os.environ.get("MARKET_POLL_SECONDS", "900"))))
+    finally:
+        confirmation_cleaner.stop(timeout=5)
 
 
 if __name__ == "__main__":

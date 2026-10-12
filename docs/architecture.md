@@ -218,6 +218,8 @@ The worker waits 30 minutes after a session closes, chooses only daily rows date
 
 Quote/FX refreshes, US catalogue refreshes, and brokerage-history rebuilds have independent schedules and failure boundaries. A provider failure cannot prevent the other jobs from running. Failed scheduled jobs retain prior data and wait for their full configured interval before retrying.
 
+`core/maintenance.py` owns `ExpiredWorkbookConfirmationCleaner`, an independent background thread started by the worker. It deletes expired database-backed workbook previews immediately and every sixty seconds, using the same locked repository delete operation as preview creation. An event stops its wait loop when the worker exits. Database failures produce a safe warning and retry at the next interval; cleanup never reads workbook contents or modifies financial ledgers.
+
 Prices refresh on startup and the periodic cycle; recording a new symbol may therefore wait until the next cycle for its first price. Brokerage history uses historical daily closes and FX rates, and deposit scenarios refresh independently on each worker poll by default. The latest OHLC cache is not a full market-data warehouse.
 
 ## HDB interest and schedules
