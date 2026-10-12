@@ -75,7 +75,8 @@ def test_deposit_refresh_runs_when_price_history_provider_fails(isolated_store, 
     monkeypatch.setattr(worker, 'fetch_fx_history', Mock(side_effect=RuntimeError('private fx payload')))
     assert worker.refresh_all_portfolio_deposit_history() == 1
     assert store.read_portfolio_deposit_history()[account] == [{'date': str(today),
-        'amount_sgd': '25', 'missing_fx_count': 1}]
+        'amount_sgd': '25', 'missing_fx_count': 1, 'stale_fx_count': 0,
+        'stale_fx_last_success_at': None}]
     before = store.read_portfolio_history()
     assert worker.refresh_all_portfolio_history() == 0
     assert store.read_portfolio_history() == before
@@ -104,6 +105,108 @@ def test_deposit_refresh_fetches_prior_week_fx_for_first_day(isolated_store, mon
     assert worker.refresh_portfolio_deposit_history() == 1
     assert fetched.call_args.args[1] == date(2025, 12, 25)
     assert store.read_portfolio_deposit_history()[account][0]['amount_sgd'] == '15.0'
+
+
+@pytest.mark.parametrize('outage', ['exception', 'empty', 'incomplete'])
+def test_deposit_refresh_uses_cached_fx_during_outage_then_recovers(isolated_store, monkeypatch, outage):
+    event_date = date(2026, 1, 1)
+    state = empty()
+    account = apply(state, 'account_add', {'name': 'Broker', 'type': 'brokerage'},
+                    'test', 'account', event_date)['id']
+    apply(state, 'deposit', {'account': account, 'currency': 'USD', 'amount': '10',
+        'date': str(event_date)}, 'test', 'deposit', event_date)
+    with store.transaction() as saved:
+        saved.clear()
+        saved.update(state)
+
+    monkeypatch.setattr(worker, 'fetch_fx_history', Mock(return_value={event_date: Decimal('1.5')}))
+    worker.refresh_portfolio_deposit_history()
+    first = store.read_portfolio_deposit_history()[account][0]
+    assert (first['amount_sgd'], first['stale_fx_count'], first['missing_fx_count']) == ('15.0', 0, 0)
+    assert first['stale_fx_last_success_at'] is None
+
+    if outage == 'exception':
+        failed = Mock(side_effect=RuntimeError('provider unavailable'))
+    elif outage == 'empty':
+        failed = Mock(return_value={})
+    else:
+        failed = Mock(return_value={date(2025, 12, 1): Decimal('1.4')})
+    monkeypatch.setattr(worker, 'fetch_fx_history', failed)
+    worker.refresh_portfolio_deposit_history()
+    stale = store.read_portfolio_deposit_history()[account][0]
+    assert (stale['amount_sgd'], stale['stale_fx_count'], stale['missing_fx_count']) == ('15.0', 1, 0)
+    assert stale['stale_fx_last_success_at'].endswith('Z')
+
+    monkeypatch.setattr(worker, 'fetch_fx_history', Mock(return_value={event_date: Decimal('1.6')}))
+    worker.refresh_portfolio_deposit_history()
+    recovered = store.read_portfolio_deposit_history()[account][0]
+    assert (recovered['amount_sgd'], recovered['stale_fx_count'], recovered['missing_fx_count']) == ('16.0', 0, 0)
+    assert recovered['stale_fx_last_success_at'] is None
+
+
+def test_deposit_projection_rebuilds_after_correction_void_and_new_event(isolated_store, monkeypatch):
+    day1, day2, today = date(2026, 1, 1), date(2026, 1, 2), date(2026, 1, 3)
+    state = empty()
+    account = apply(state, 'account_add', {'name': 'Broker', 'type': 'brokerage'},
+                    'test', 'account', today)['id']
+    original = apply(state, 'deposit', {'account': account, 'currency': 'USD', 'amount': '10',
+        'date': str(day1)}, 'test', 'deposit', today)['id']
+    with store.transaction() as saved:
+        saved.clear()
+        saved.update(state)
+    monkeypatch.setattr(worker, 'fetch_fx_history', Mock(return_value={day1: Decimal('1.5'), day2: Decimal('2')}))
+    worker.refresh_portfolio_deposit_history()
+    assert store.read_portfolio_deposit_history()[account][0]['amount_sgd'] == '15.0'
+
+    corrected = apply(state, 'correct', {'transaction': original, 'changes': {'amount': '20'}},
+                      'test', 'correct-amount', today)['id']
+    with store.transaction() as saved:
+        saved.clear(); saved.update(state)
+    monkeypatch.setattr(worker, 'fetch_fx_history', Mock(side_effect=RuntimeError('offline')))
+    worker.refresh_portfolio_deposit_history()
+    assert store.read_portfolio_deposit_history()[account][0]['amount_sgd'] == '30.0'
+
+    corrected = apply(state, 'correct', {'transaction': corrected, 'changes': {'date': str(day2)}},
+                      'test', 'correct-date', today)['id']
+    with store.transaction() as saved:
+        saved.clear(); saved.update(state)
+    worker.refresh_portfolio_deposit_history()
+    rows = store.read_portfolio_deposit_history()[account]
+    assert [(row['date'], row['amount_sgd']) for row in rows] == [(str(day2), '40')]
+
+    apply(state, 'void', {'transaction': corrected}, 'test', 'void', today)
+    with store.transaction() as saved:
+        saved.clear(); saved.update(state)
+    worker.refresh_portfolio_deposit_history()
+    assert store.read_portfolio_deposit_history() == {}
+
+    apply(state, 'deposit', {'account': account, 'currency': 'USD', 'amount': '5',
+        'date': str(day1)}, 'test', 'new-deposit', today)
+    with store.transaction() as saved:
+        saved.clear(); saved.update(state)
+    worker.refresh_portfolio_deposit_history()
+    new_row = store.read_portfolio_deposit_history()[account][0]
+    assert (new_row['date'], new_row['amount_sgd'], new_row['stale_fx_count']) == (str(day1), '7.5', 1)
+
+
+def test_cached_deposit_fx_is_tenant_isolated(isolated_store, monkeypatch):
+    event_date = date(2026, 1, 1)
+    for principal in ('tenant-a', 'tenant-b'):
+        state = empty()
+        account = apply(state, 'account_add', {'name': 'Broker', 'type': 'brokerage'},
+                        'test', 'account-' + principal, event_date)['id']
+        apply(state, 'deposit', {'account': account, 'currency': 'USD', 'amount': '10',
+            'date': str(event_date)}, 'test', 'deposit-' + principal, event_date)
+        with store.tenant_transaction(principal) as saved:
+            saved.clear(); saved.update(state)
+    monkeypatch.setattr(worker, 'fetch_fx_history', Mock(return_value={event_date: Decimal('1.5')}))
+    worker.refresh_portfolio_deposit_history('tenant-a')
+    monkeypatch.setattr(worker, 'fetch_fx_history', Mock(side_effect=RuntimeError('offline')))
+    worker.refresh_portfolio_deposit_history('tenant-b')
+    a = next(iter(store.read_portfolio_deposit_history('tenant-a').values()))[0]
+    b = next(iter(store.read_portfolio_deposit_history('tenant-b').values()))[0]
+    assert (a['amount_sgd'], a['missing_fx_count']) == ('15.0', 0)
+    assert (b['amount_sgd'], b['stale_fx_count'], b['missing_fx_count']) == ('0', 0, 1)
 
 
 def test_worker_failure_log_has_safe_context_without_exception_message(caplog):

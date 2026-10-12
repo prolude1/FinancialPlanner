@@ -22,12 +22,16 @@ const assert = require('assert');
   assert.equal(series.values[1].scenarios[1], 5000 * 1.1 ** 3 + 2000);
   const partial = brokerageProjectionSeries(rows, [
     { date: '2023-01-01', amount_sgd: '5000' },
-    { date: '2025-01-01', amount_sgd: '250', missing_fx_count: 2 },
+    { date: '2025-01-01', amount_sgd: '250', missing_fx_count: 2, stale_fx_count: 3,
+      stale_fx_last_success_at: '2025-01-03T09:00:00Z' },
   ]);
   assert.equal(partial.available, true);
   assert.equal(partial.complete, false);
   assert.equal(partial.missingFxCount, 2);
   assert.deepEqual(partial.missingFxDates, ['2025-01-01']);
+  assert.equal(partial.staleFxCount, 3);
+  assert.deepEqual(partial.staleFxDates, ['2025-01-01']);
+  assert.deepEqual(partial.staleFxLastSuccessAt, ['2025-01-03T09:00:00Z']);
   assert.equal(partial.values.length, rows.length, 'valid partial projections remain available across the whole history');
   assert.equal(partial.values[0].scenarios[1], 5000 * 1.1 ** 2 + 250);
   assert.equal(partial.values[1].scenarios[1], 5000 * 1.1 ** 3 + 250 * 1.1);
@@ -39,7 +43,8 @@ const assert = require('assert');
   assert.equal(legacyMissing.values[0].scenarios[0], 0);
 
   const staleValuations = [{ date: '2026-01-01', value_sgd: '10000' }, { date: '2026-03-01', value_sgd: '11000' }];
-  const recentDeposits = [{ date: '2026-04-01', amount_sgd: '500' }];
+  const recentDeposits = [{ date: '2026-04-01', amount_sgd: '500', stale_fx_count: 2,
+    stale_fx_last_success_at: '2026-04-10T09:00:00Z' }];
   const timeline = brokerageProjectionDates(staleValuations, recentDeposits, { extendAfterLast: true });
   assert.deepEqual(timeline.map(point => point.date), ['2026-01-01', '2026-03-01', '2026-04-01']);
   assert.equal(Object.hasOwn(timeline.at(-1), 'value_sgd'), false, 'projection-only dates carry no fabricated valuation');
@@ -73,6 +78,9 @@ const assert = require('assert');
   assert(plot.innerHTML.includes('2026-04-01'), 'the chart axis reaches a deposit newer than its last valuation');
   assert(plot.innerHTML.includes('Account value is available through 2026-03-01'));
   assert(plot.innerHTML.includes('no account valuation is available'));
+  assert(plot.innerHTML.includes('FX refresh unavailable; using last successfully retrieved historical rates'));
+  assert(plot.innerHTML.includes('Last successful retrieval:'));
+  assert(plot.innerHTML.includes('10 Apr 2026'));
   const actualPoints = plot.innerHTML.match(/chart-line-actual" points="([^"]*)"/)[1].split(' ');
   assert(Number(actualPoints.at(-1).split(',')[0]) < 782, 'the actual value line ends before the projection-only date');
   pages.chartHover({ clientX: 800, target: { closest: selector => selector === '.brokerage-chart' ? chartRoot : selector === 'svg' ? svg : null } });

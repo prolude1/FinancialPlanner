@@ -27,7 +27,9 @@ def isolated_store(tmp_path, monkeypatch):
         connection.execute(delete(store.tenant_ledger))
         connection.execute(delete(store.tenant_portfolio_history))
         connection.execute(delete(store.tenant_portfolio_deposit_history))
+        connection.execute(delete(store.tenant_portfolio_deposit_fx_rates))
         connection.execute(delete(store.portfolio_deposit_history))
+        connection.execute(delete(store.portfolio_deposit_fx_rates))
         connection.execute(delete(store.workbook_confirmations))
         connection.execute(delete(store.legacy_claim_codes))
         connection.execute(store.legacy_claim.update().values(claimed_by=None, claimed_at=None))
@@ -81,8 +83,38 @@ def test_deposit_missing_fx_column_migrates_existing_projection_tables(tmp_path,
     store.migrate()
     assert "missing_fx_count" in {column["name"] for column in inspect(engine).get_columns("portfolio_deposit_history")}
     assert "missing_fx_count" in {column["name"] for column in inspect(engine).get_columns("tenant_portfolio_deposit_history")}
+    assert "stale_fx_count" in {column["name"] for column in inspect(engine).get_columns("portfolio_deposit_history")}
+    assert "stale_fx_count" in {column["name"] for column in inspect(engine).get_columns("tenant_portfolio_deposit_history")}
+    assert "stale_fx_last_success_at" in {column["name"] for column in inspect(engine).get_columns("portfolio_deposit_history")}
+    assert "stale_fx_last_success_at" in {column["name"] for column in inspect(engine).get_columns("tenant_portfolio_deposit_history")}
     assert store.read_portfolio_deposit_history()["a"][0]["amount_sgd"] == "10"
     assert store.read_portfolio_deposit_history()["a"][0]["missing_fx_count"] == 0
+    assert store.read_portfolio_deposit_history()["a"][0]["stale_fx_count"] == 0
+    assert store.read_portfolio_deposit_history()["a"][0]["stale_fx_last_success_at"] is None
+    engine.dispose()
+
+
+def test_history_migration_allows_null_external_flow_and_preserves_rows(tmp_path, monkeypatch):
+    from sqlalchemy import create_engine
+    engine = create_engine("sqlite:///" + str(tmp_path / "old-history-schema.db"))
+    monkeypatch.setattr(store, "engine", engine)
+    store.metadata.create_all(engine)
+    with engine.begin() as connection:
+        connection.execute(text("DROP TABLE portfolio_history"))
+        connection.execute(text("DROP TABLE tenant_portfolio_history"))
+        connection.execute(text("CREATE TABLE portfolio_history (account VARCHAR(10) NOT NULL, date VARCHAR(10) NOT NULL, value_sgd VARCHAR(64) NOT NULL, gross_change_sgd VARCHAR(64), adjusted_change_sgd VARCHAR(64), external_flow_sgd VARCHAR(64) NOT NULL, updated_at DATETIME NOT NULL, PRIMARY KEY (account, date))"))
+        connection.execute(text("CREATE TABLE tenant_portfolio_history (principal VARCHAR(64) NOT NULL, account VARCHAR(10) NOT NULL, date VARCHAR(10) NOT NULL, value_sgd VARCHAR(64) NOT NULL, gross_change_sgd VARCHAR(64), adjusted_change_sgd VARCHAR(64), external_flow_sgd VARCHAR(64) NOT NULL, updated_at DATETIME NOT NULL, PRIMARY KEY (principal, account, date))"))
+        connection.execute(text("INSERT INTO portfolio_history VALUES ('a', '2026-01-01', '10', NULL, NULL, '10', '2026-01-01 00:00:00')"))
+        connection.execute(text("INSERT INTO tenant_portfolio_history VALUES ('owner', 'b', '2026-01-01', '20', NULL, NULL, '20', '2026-01-01 00:00:00')"))
+    store.migrate()
+    assert next(column for column in inspect(engine).get_columns("portfolio_history")
+                if column["name"] == "external_flow_sgd")["nullable"]
+    assert next(column for column in inspect(engine).get_columns("tenant_portfolio_history")
+                if column["name"] == "external_flow_sgd")["nullable"]
+    store.replace_portfolio_history([{"account": "a", "date": "2026-01-02", "value_sgd": "11",
+        "gross_change_sgd": "1", "adjusted_change_sgd": None, "external_flow_sgd": None,
+        "updated_at": datetime.now(timezone.utc)}])
+    assert store.read_portfolio_history()["a"][0]["external_flow_sgd"] is None
     engine.dispose()
 
 
@@ -98,6 +130,8 @@ def test_legacy_claim_is_hash_only_atomic_one_use_and_moves_history(isolated_sto
             external_flow_sgd="12", updated_at=now))
         connection.execute(insert(store.portfolio_deposit_history).values(account="legacy", date="2026-01-01",
             amount_sgd="50", missing_fx_count=0))
+        connection.execute(insert(store.portfolio_deposit_fx_rates).values(currency="USD", date="2026-01-01",
+            rate="1.5", fetched_at=1767225600000000000))
     # A login/bootstrap request may already have created the owner's empty tenant.
     assert store.read_for("owner")["accounts"] == {}
     code = store.issue_legacy_claim(now=1000)
@@ -111,8 +145,11 @@ def test_legacy_claim_is_hash_only_atomic_one_use_and_moves_history(isolated_sto
     assert store.read_for("owner")["accounts"]["legacy"]["name"] == "Legacy"
     assert store.read_portfolio_history("owner")["legacy"][0]["value_sgd"] == "12"
     assert store.read_portfolio_deposit_history("owner")["legacy"][0]["amount_sgd"] == "50"
+    assert store.read_portfolio_deposit_fx_rates("owner") == {
+        "USD": {"2026-01-01": {"rate": "1.5", "fetched_at": 1767225600000000000}}}
     assert store.read_portfolio_history() == {}
     assert store.read_portfolio_deposit_history() == {}
+    assert store.read_portfolio_deposit_fx_rates() == {}
     with pytest.raises(PermissionError):
         store.read_legacy()
     with pytest.raises(ValueError):

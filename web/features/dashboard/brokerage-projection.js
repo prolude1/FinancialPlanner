@@ -56,24 +56,36 @@ export function brokerageProjectionDates(rows, deposits, { extendAfterLast = fal
 /** Project converted deposit contributions; unconverted FX amounts are excluded and disclosed. */
 export function brokerageProjectionSeries(rows, deposits, rates = BROKERAGE_RETURN_SCENARIOS) {
   if (!rows.length || !Array.isArray(deposits)) {
-    return { available: false, complete: false, missingFxCount: 0, missingFxDates: [], values: [] };
+    return { available: false, complete: false, missingFxCount: 0, missingFxDates: [],
+      staleFxCount: 0, staleFxDates: [], staleFxLastSuccessAt: [], values: [] };
   }
 
   let missingFxCount = 0;
+  let staleFxCount = 0;
   const missingFxDates = new Set();
+  const staleFxDates = new Set();
+  const staleFxLastSuccessAt = new Set();
   const contributions = [];
   for (const deposit of deposits) {
     const amount = deposit.amount_sgd == null ? null : Number(deposit.amount_sgd);
     const missingCount = Number.isFinite(Number(deposit.missing_fx_count))
       ? Math.max(0, Math.floor(Number(deposit.missing_fx_count)))
       : (deposit.missing_fx || amount == null ? 1 : 0);
+    const staleCount = Number.isFinite(Number(deposit.stale_fx_count))
+      ? Math.max(0, Math.floor(Number(deposit.stale_fx_count))) : 0;
     if (missingCount) {
       missingFxCount += missingCount;
       missingFxDates.add(deposit.date);
     }
+    if (staleCount) {
+      staleFxCount += staleCount;
+      staleFxDates.add(deposit.date);
+      if (deposit.stale_fx_last_success_at) staleFxLastSuccessAt.add(deposit.stale_fx_last_success_at);
+    }
     if (amount == null) continue;
     if (!Number.isFinite(amount)) {
-      return { available: false, complete: false, missingFxCount, missingFxDates: [...missingFxDates].sort(), values: [] };
+      return { available: false, complete: false, missingFxCount, missingFxDates: [...missingFxDates].sort(),
+        staleFxCount, staleFxDates: [...staleFxDates].sort(), staleFxLastSuccessAt: [...staleFxLastSuccessAt].sort(), values: [] };
     }
     if (amount > 0) contributions.push({ date: deposit.date, amount });
   }
@@ -91,6 +103,9 @@ export function brokerageProjectionSeries(rows, deposits, rates = BROKERAGE_RETU
     complete: missingFxCount === 0,
     missingFxCount,
     missingFxDates: [...missingFxDates].sort(),
+    staleFxCount,
+    staleFxDates: [...staleFxDates].sort(),
+    staleFxLastSuccessAt: [...staleFxLastSuccessAt].sort(),
     values,
   };
 }

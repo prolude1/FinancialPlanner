@@ -192,8 +192,9 @@ _EMPTY_DATE_SERIES = _DateSeriesIndex({})
 
 
 def _portfolio_external_flow(events, account_id, when, quote_indexes, rate_indexes):
-    """Convert this date's external cash/investment flows to SGD."""
+    """Convert this date's external flows and report whether every input is known."""
     flow = Decimal(0)
+    complete = True
     for event in events:
         payload, kind = event["data"], event["kind"]
         if payload.get("account") == account_id and kind in (
@@ -205,17 +206,23 @@ def _portfolio_external_flow(events, account_id, when, quote_indexes, rate_index
             rate = Decimal(1) if currency == "SGD" else rate_indexes.get(currency, _EMPTY_DATE_SERIES).at_or_before(when)
             if rate is not None:
                 flow += amount * rate
+            else:
+                complete = False
         if kind == "transfer":
             if payload.get("account") == account_id:
                 currency = payload["currency"]
                 rate = Decimal(1) if currency == "SGD" else rate_indexes.get(currency, _EMPTY_DATE_SERIES).at_or_before(when)
                 if rate is not None:
                     flow -= decimal(payload["amount"]) * rate
+                else:
+                    complete = False
             if payload.get("destination") == account_id:
                 currency = payload["to_currency"]
                 rate = Decimal(1) if currency == "SGD" else rate_indexes.get(currency, _EMPTY_DATE_SERIES).at_or_before(when)
                 if rate is not None:
                     flow += decimal(payload["received"]) * rate
+                else:
+                    complete = False
         if kind == "opening_holding" and payload.get("account") == account_id:
             iid = instrument(payload)["id"]
             close = quote_indexes.get(iid, _EMPTY_DATE_SERIES).at_or_before(when)
@@ -223,12 +230,14 @@ def _portfolio_external_flow(events, account_id, when, quote_indexes, rate_index
             rate = Decimal(1) if currency == "SGD" else rate_indexes.get(currency, _EMPTY_DATE_SERIES).at_or_before(when)
             if close is not None and rate is not None:
                 flow += decimal(payload["quantity"]) * close * rate
+            else:
+                complete = False
         if kind == "repayment":
             flow -= sum((decimal(item["amount"]) for item in payload["allocations"]
                          if item["account"] == account_id), Decimal(0))
         if kind == "credit_payment" and payload.get("funding_account") == account_id:
             flow -= decimal(payload["amount"])
-    return flow
+    return flow, complete
 
 
 def build_portfolio_history(snapshot, quotes, rates, today):
@@ -244,6 +253,8 @@ def build_portfolio_history(snapshot, quotes, rates, today):
     rate_indexes = {currency: _DateSeriesIndex(series) for currency, series in rates.items()}
     accounts = [a for a in snapshot["accounts"].values() if a["type"] == "brokerage"]
     previous = {}
+    accumulated_flow = {}
+    accumulated_flow_complete = {}
     rows = []
     state = new_replay_state()
     when = first
@@ -254,6 +265,10 @@ def build_portfolio_history(snapshot, quotes, rates, today):
         cash, positions, instruments, *_ = state
         for account_row in accounts:
             aid, total, complete = account_row["id"], Decimal(0), True
+            flow, flow_complete = _portfolio_external_flow(
+                daily_events, aid, when, quote_indexes, rate_indexes)
+            accumulated_flow[aid] = accumulated_flow.get(aid, Decimal(0)) + flow
+            accumulated_flow_complete[aid] = accumulated_flow_complete.get(aid, True) and flow_complete
             for (cash_account, cur), amount in cash.items():
                 if cash_account != aid or not amount:
                     continue
@@ -274,19 +289,22 @@ def build_portfolio_history(snapshot, quotes, rates, today):
                     total += quantity * close * rate
             if not complete:
                 continue
-            flow = _portfolio_external_flow(daily_events, aid, when, quote_indexes, rate_indexes)
             gross = None if aid not in previous else total - previous[aid]
-            adjusted = None if gross is None else gross - flow
+            flow_known = accumulated_flow_complete[aid]
+            adjusted = None if gross is None or not flow_known else gross - accumulated_flow[aid]
             rows.append({"account": aid, "date": str(when), "value_sgd": str(total),
                          "gross_change_sgd": None if gross is None else str(gross),
                          "adjusted_change_sgd": None if adjusted is None else str(adjusted),
-                         "external_flow_sgd": str(flow), "updated_at": datetime.now(timezone.utc)})
+                         "external_flow_sgd": str(accumulated_flow[aid]) if flow_known else None,
+                         "updated_at": datetime.now(timezone.utc)})
             previous[aid] = total
+            accumulated_flow[aid] = Decimal(0)
+            accumulated_flow_complete[aid] = True
         when += timedelta(days=1)
     return rows
 
 
-def build_portfolio_deposit_history(snapshot, rates, today):
+def build_portfolio_deposit_history(snapshot, rates, today, stale_rate_fetches=None):
     """Convert active brokerage deposits independently of daily price coverage."""
     accounts = {account_id for account_id, account in snapshot["accounts"].items()
                 if account["type"] == "brokerage" and not account.get("archived")}
@@ -298,18 +316,44 @@ def build_portfolio_deposit_history(snapshot, rates, today):
             continue
         key = (account_id, event["date"])
         deposit = deposits.setdefault(key, {"account": account_id, "date": event["date"],
-                                            "amount": Decimal(0), "missing_fx_count": 0})
+            "amount": Decimal(0), "missing_fx_count": 0, "stale_fx_count": 0,
+            "stale_fx_last_success_at": None})
         currency = payload.get("currency", "SGD")
-        rate = Decimal(1) if currency == "SGD" else _at_or_before(rates.get(currency, {}), date.fromisoformat(event["date"]))
+        rate_date = None if currency == "SGD" else _latest_rate_date(
+            rates.get(currency, {}), date.fromisoformat(event["date"]))
+        rate = Decimal(1) if currency == "SGD" else (
+            rates.get(currency, {}).get(rate_date) if rate_date is not None else None)
         if rate is None:
             deposit["missing_fx_count"] += 1
         else:
             deposit["amount"] += decimal(payload["amount"]) * rate
+            fetched_at = (stale_rate_fetches or {}).get((currency, rate_date))
+            if fetched_at is not None:
+                deposit["stale_fx_count"] += 1
+                previous = deposit["stale_fx_last_success_at"]
+                if previous is None or fetched_at < previous[0]:
+                    deposit["stale_fx_last_success_at"] = (
+                        fetched_at, _iso_timestamp_from_ns(fetched_at))
 
     return [{"account": deposit["account"], "date": deposit["date"],
              "amount_sgd": str(deposit["amount"]),
-             "missing_fx_count": deposit["missing_fx_count"]}
+             "missing_fx_count": deposit["missing_fx_count"],
+             "stale_fx_count": deposit["stale_fx_count"],
+             "stale_fx_last_success_at": (deposit["stale_fx_last_success_at"][1]
+                                          if deposit["stale_fx_last_success_at"] else None)}
             for deposit in sorted(deposits.values(), key=lambda item: (item["account"], item["date"]))]
+
+
+def _latest_rate_date(series, when):
+    available = [date_key for date_key in series if date_key <= when]
+    return max(available) if available else None
+
+
+def _iso_timestamp_from_ns(value):
+    seconds, nanoseconds = divmod(value, 1_000_000_000)
+    stamp = datetime.fromtimestamp(seconds, timezone.utc).replace(
+        microsecond=nanoseconds // 1000)
+    return stamp.isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
 def refresh_portfolio_history(principal=None):
@@ -370,14 +414,42 @@ def refresh_portfolio_deposit_history(principal=None):
         return 0
     start = min(date.fromisoformat(event["date"]) for event in events) - timedelta(days=7)
     currencies = {event["data"].get("currency", "SGD") for event in events} - {"SGD"}
-    rates = {"SGD": {start: Decimal(1)}}
+    fetch_started_at = time.time_ns()
     for currency in currencies:
         try:
-            rates[currency] = fetch_fx_history(currency, start, today)
+            fetched = fetch_fx_history(currency, start, today)
         except Exception as exc:
             log_worker_failure(worker_logger, "deposit-fx-provider", exc)
-            rates[currency] = {}
-    rows = build_portfolio_deposit_history(snapshot, rates, today)
+            continue
+        fetched_at = time.time_ns()
+        fresh_rows = []
+        for raw_date, raw_rate in (fetched or {}).items():
+            try:
+                rate_date = raw_date.date() if isinstance(raw_date, datetime) else (
+                    raw_date if isinstance(raw_date, date) else date.fromisoformat(str(raw_date)))
+                rate = Decimal(str(raw_rate))
+            except (TypeError, ValueError, ArithmeticError):
+                continue
+            if rate_date < start or rate_date > today or not rate.is_finite() or rate <= 0:
+                continue
+            fresh_rows.append({"currency": currency, "date": str(rate_date),
+                               "rate": str(rate), "fetched_at": fetched_at})
+        if fresh_rows:
+            store.upsert_portfolio_deposit_fx_rates(fresh_rows, principal=principal)
+        else:
+            worker_logger.warning("Historical FX response had no usable rates; cached rates retained")
+
+    cached = store.read_portfolio_deposit_fx_rates(
+        principal, currencies=currencies, start_date=start)
+    rates, stale_rate_fetches = {"SGD": {}}, {}
+    for currency, observations in cached.items():
+        rates[currency] = {}
+        for date_text, observation in observations.items():
+            rate_date = date.fromisoformat(date_text)
+            rates[currency][rate_date] = Decimal(observation["rate"])
+            if observation["fetched_at"] < fetch_started_at:
+                stale_rate_fetches[(currency, rate_date)] = observation["fetched_at"]
+    rows = build_portfolio_deposit_history(snapshot, rates, today, stale_rate_fetches)
     store.replace_portfolio_deposit_history(rows, principal=principal)
     missing_fx_count = sum(row["missing_fx_count"] for row in rows)
     worker_logger.info("Deposit projection refreshed rows=%s missing_fx_count=%s partial=%s",

@@ -39,7 +39,7 @@ portfolio_history = Table(
     Column("value_sgd", String(64), nullable=False),
     Column("gross_change_sgd", String(64)),
     Column("adjusted_change_sgd", String(64)),
-    Column("external_flow_sgd", String(64), nullable=False),
+    Column("external_flow_sgd", String(64)),
     Column("updated_at", DateTime(timezone=True), nullable=False),
 )
 tenant_portfolio_history = Table(
@@ -50,7 +50,7 @@ tenant_portfolio_history = Table(
     Column("value_sgd", String(64), nullable=False),
     Column("gross_change_sgd", String(64)),
     Column("adjusted_change_sgd", String(64)),
-    Column("external_flow_sgd", String(64), nullable=False),
+    Column("external_flow_sgd", String(64)),
     Column("updated_at", DateTime(timezone=True), nullable=False),
 )
 portfolio_deposit_history = Table(
@@ -59,6 +59,8 @@ portfolio_deposit_history = Table(
     Column("date", String(10), primary_key=True),
     Column("amount_sgd", String(64)),
     Column("missing_fx_count", Integer, nullable=False, server_default="0"),
+    Column("stale_fx_count", Integer, nullable=False, server_default="0"),
+    Column("stale_fx_last_success_at", String(32)),
 )
 tenant_portfolio_deposit_history = Table(
     "tenant_portfolio_deposit_history", metadata,
@@ -67,6 +69,23 @@ tenant_portfolio_deposit_history = Table(
     Column("date", String(10), primary_key=True),
     Column("amount_sgd", String(64)),
     Column("missing_fx_count", Integer, nullable=False, server_default="0"),
+    Column("stale_fx_count", Integer, nullable=False, server_default="0"),
+    Column("stale_fx_last_success_at", String(32)),
+)
+portfolio_deposit_fx_rates = Table(
+    "portfolio_deposit_fx_rates", metadata,
+    Column("currency", String(3), primary_key=True),
+    Column("date", String(10), primary_key=True),
+    Column("rate", String(64), nullable=False),
+    Column("fetched_at", BigInteger, nullable=False),
+)
+tenant_portfolio_deposit_fx_rates = Table(
+    "tenant_portfolio_deposit_fx_rates", metadata,
+    Column("principal", String(64), primary_key=True),
+    Column("currency", String(3), primary_key=True),
+    Column("date", String(10), primary_key=True),
+    Column("rate", String(64), nullable=False),
+    Column("fetched_at", BigInteger, nullable=False),
 )
 bot_runtime = Table("bot_runtime", metadata,
     Column("id", Integer, primary_key=True), Column("data", JSON, nullable=False))
@@ -124,6 +143,40 @@ def migrate():
             if "missing_fx_count" not in columns:
                 c.exec_driver_sql(
                     f"ALTER TABLE {table_name} ADD COLUMN missing_fx_count INTEGER NOT NULL DEFAULT 0")
+            if "stale_fx_count" not in columns:
+                c.exec_driver_sql(
+                    f"ALTER TABLE {table_name} ADD COLUMN stale_fx_count INTEGER NOT NULL DEFAULT 0")
+            if "stale_fx_last_success_at" not in columns:
+                c.exec_driver_sql(
+                    f"ALTER TABLE {table_name} ADD COLUMN stale_fx_last_success_at VARCHAR(32)")
+        for table_name in ("portfolio_history", "tenant_portfolio_history"):
+            external_flow = next(column for column in inspect(c).get_columns(table_name)
+                                 if column["name"] == "external_flow_sgd")
+            if not external_flow["nullable"]:
+                if c.dialect.name == "postgresql":
+                    c.exec_driver_sql(
+                        f"ALTER TABLE {table_name} ALTER COLUMN external_flow_sgd DROP NOT NULL")
+                elif c.dialect.name == "sqlite":
+                    # SQLite lacks ALTER COLUMN DROP NOT NULL. Rebuild the small
+                    # projection table while preserving every persisted row.
+                    suffix = "_nullable_migration"
+                    replacement = table_name + suffix
+                    c.exec_driver_sql(f"DROP TABLE IF EXISTS {replacement}")
+                    c.exec_driver_sql(f"""CREATE TABLE {replacement} (
+                        account VARCHAR(10) NOT NULL,
+                        date VARCHAR(10) NOT NULL,
+                        value_sgd VARCHAR(64) NOT NULL,
+                        gross_change_sgd VARCHAR(64),
+                        adjusted_change_sgd VARCHAR(64),
+                        external_flow_sgd VARCHAR(64),
+                        updated_at DATETIME NOT NULL,
+                        {"principal VARCHAR(64) NOT NULL, " if table_name.startswith("tenant_") else ""}
+                        PRIMARY KEY ({"principal, " if table_name.startswith("tenant_") else ""}account, date))""")
+                    columns = "principal, account, date, " if table_name.startswith("tenant_") else "account, date, "
+                    columns += "value_sgd, gross_change_sgd, adjusted_change_sgd, external_flow_sgd, updated_at"
+                    c.exec_driver_sql(f"INSERT INTO {replacement} ({columns}) SELECT {columns} FROM {table_name}")
+                    c.exec_driver_sql(f"DROP TABLE {table_name}")
+                    c.exec_driver_sql(f"ALTER TABLE {replacement} RENAME TO {table_name}")
         if c.execute(select(state.c.id)).first() is None:
             data = empty()
             bot = data.pop("bot", {"offset": 0, "session": None})
@@ -376,6 +429,47 @@ def read_portfolio_deposit_history(principal=None):
         return result
 
 
+def read_portfolio_deposit_fx_rates(principal=None, currencies=None, start_date=None):
+    """Read cached historical conversion inputs for the requested ledger scope."""
+    table = portfolio_deposit_fx_rates if principal is None else tenant_portfolio_deposit_fx_rates
+    if currencies is not None and not currencies:
+        return {}
+    with engine.connect() as c:
+        stmt = select(table)
+        if principal is not None:
+            stmt = stmt.where(table.c.principal == principal)
+        if currencies is not None:
+            stmt = stmt.where(table.c.currency.in_(tuple(currencies)))
+        if start_date is not None:
+            stmt = stmt.where(table.c.date >= str(start_date))
+        result = {}
+        for row in c.execute(stmt.order_by(table.c.currency, table.c.date)).mappings():
+            result.setdefault(row["currency"], {})[row["date"]] = {
+                "rate": row["rate"], "fetched_at": row["fetched_at"]}
+        return result
+
+
+def upsert_portfolio_deposit_fx_rates(rows, principal=None):
+    """Persist fresh historical rates without removing older usable observations."""
+    if not rows:
+        return
+    with engine.begin() as c:
+        lock_application(c)
+        table = portfolio_deposit_fx_rates if principal is None else tenant_portfolio_deposit_fx_rates
+        for row in rows:
+            values = dict(row)
+            if principal is not None:
+                values["principal"] = principal
+            key = {name: values[name] for name in ("currency", "date")}
+            if principal is not None:
+                key["principal"] = principal
+            result = c.execute(update(table).where(*(table.c[name] == value
+                                                     for name, value in key.items())).values(
+                rate=values["rate"], fetched_at=values["fetched_at"]))
+            if result.rowcount == 0:
+                c.execute(table.insert().values(**values))
+
+
 def read_stock_cache(security_id, kind):
     with engine.connect() as c:
         row = c.execute(select(stock_cache).where(
@@ -515,8 +609,11 @@ def redeem_legacy_claim(principal, token, now=None):
             tenant_portfolio_history.c.principal == principal).limit(1)).first()
         tenant_deposit_history = c.execute(select(tenant_portfolio_deposit_history.c.account).where(
             tenant_portfolio_deposit_history.c.principal == principal).limit(1)).first()
+        tenant_deposit_fx = c.execute(select(tenant_portfolio_deposit_fx_rates.c.currency).where(
+            tenant_portfolio_deposit_fx_rates.c.principal == principal).limit(1)).first()
         tenant_has_data = ((tenant is not None and tenant["data"] != _new_tenant_data())
-                           or tenant_history is not None or tenant_deposit_history is not None)
+                           or tenant_history is not None or tenant_deposit_history is not None
+                           or tenant_deposit_fx is not None)
         if (claim["claimed_by"] is not None or code is None or code["consumed_at"] is not None
                 or code["expires_at"] < now or tenant_has_data):
             raise ValueError("Claim code is invalid, expired, or already used")
@@ -535,6 +632,10 @@ def redeem_legacy_claim(principal, token, now=None):
         if deposit_history:
             c.execute(tenant_portfolio_deposit_history.insert(), [dict(row, principal=principal)
                                                                   for row in deposit_history])
+        deposit_fx_rates = c.execute(select(portfolio_deposit_fx_rates)).mappings().all()
+        if deposit_fx_rates:
+            c.execute(tenant_portfolio_deposit_fx_rates.insert(), [dict(row, principal=principal)
+                                                                   for row in deposit_fx_rates])
         c.execute(update(legacy_claim_codes).where(
             legacy_claim_codes.c.token_hash == digest).values(consumed_at=now))
         c.execute(update(legacy_claim).where(legacy_claim.c.id == 1).values(
@@ -542,6 +643,7 @@ def redeem_legacy_claim(principal, token, now=None):
         c.execute(update(state).where(state.c.id == 1).values(data=_new_tenant_data()))
         c.execute(delete(portfolio_history))
         c.execute(delete(portfolio_deposit_history))
+        c.execute(delete(portfolio_deposit_fx_rates))
     return {"status": "claimed"}
 
 

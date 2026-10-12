@@ -68,7 +68,8 @@ def test_brokerage_history_separates_cash_flow_from_investment_movement():
     deposits = build_portfolio_deposit_history(state,
         {"USD": {date(2026, 1, 2): Decimal("1.4")}}, date(2026, 1, 2))
     assert deposits == [{"account": account, "date": "2026-01-02", "amount_sgd": "14.0",
-                         "missing_fx_count": 0}]
+                         "missing_fx_count": 0, "stale_fx_count": 0,
+                         "stale_fx_last_success_at": None}]
 
 
 def test_portfolio_history_replays_events_once_and_preserves_missing_market_data_gaps(monkeypatch):
@@ -106,7 +107,7 @@ def test_portfolio_history_replays_events_once_and_preserves_missing_market_data
     assert [(row["account"], row["date"], row["value_sgd"], row["gross_change_sgd"],
              row["adjusted_change_sgd"], row["external_flow_sgd"]) for row in rows] == [
         (cash_only, str(first), "5", None, None, "5"),
-        (invested, str(second), "181.4", None, None, "10"),
+        (invested, str(second), "181.4", None, None, None),
         (cash_only, str(second), "5", "0", "0", "0"),
     ]
 
@@ -128,6 +129,44 @@ def test_portfolio_history_still_validates_events_before_market_data_is_complete
         worker.build_portfolio_history(state, {}, {}, second)
 
 
+def test_portfolio_history_accumulates_flows_across_valuation_gap_and_marks_unknown_flow():
+    state = empty()
+    day0, gap_day, valid_day = date(2026, 1, 1), date(2026, 1, 2), date(2026, 1, 3)
+    def run(command, payload, key):
+        return apply(state, command, payload, "test", key, valid_day)
+    account = run("account_add", {"name": "Broker", "type": "brokerage", "currency": "SGD"}, "a")["id"]
+    run("opening_cash", {"account": account, "currency": "SGD", "amount": "100", "date": str(day0)}, "e0")
+    run("opening_cash", {"account": account, "currency": "USD", "amount": "20", "date": str(gap_day)}, "e1")
+    run("buy", {"account": account, "exchange": "NASDAQ", "symbol": "AAPL", "asset_class": "equity",
+        "currency": "USD", "quantity": "1", "price": "5", "date": str(gap_day)}, "e2")
+    run("deposit", {"account": account, "currency": "SGD", "amount": "25", "date": str(valid_day)}, "e3")
+    rows = build_portfolio_history(state,
+        {"NASDAQ:AAPL": {valid_day: Decimal("20")}},
+        {"USD": {gap_day: Decimal("1.3"), valid_day: Decimal("1.4")}}, valid_day)
+    assert len(rows) == 2
+    assert rows[0]["date"] == str(day0)
+    assert (rows[1]["value_sgd"], rows[1]["gross_change_sgd"], rows[1]["external_flow_sgd"],
+            rows[1]["adjusted_change_sgd"]) == ("174.0", "74.0", "51.0", "23.0")
+
+    # Unknown FX on external flows must invalidate adjusted movement even when
+    # opposing flows leave the ending cash balance unchanged.
+    missing = empty()
+    acct = apply(missing, "account_add", {"name": "Cash", "type": "brokerage", "currency": "SGD"},
+                 "test", "ma", valid_day)["id"]
+    apply(missing, "opening_cash", {"account": acct, "currency": "SGD", "amount": "100", "date": str(day0)},
+          "test", "m0", valid_day)
+    apply(missing, "deposit", {"account": acct, "currency": "USD", "amount": "10", "date": str(gap_day)},
+          "test", "m1", valid_day)
+    apply(missing, "withdraw", {"account": acct, "currency": "USD", "amount": "10", "date": str(gap_day)},
+          "test", "m2", valid_day)
+    missing_rows = build_portfolio_history(missing, {}, {}, valid_day)
+    assert len(missing_rows) == 3
+    assert missing_rows[1]["value_sgd"] == "100"
+    assert missing_rows[1]["external_flow_sgd"] is None
+    assert missing_rows[1]["adjusted_change_sgd"] is None
+    assert (missing_rows[2]["external_flow_sgd"], missing_rows[2]["adjusted_change_sgd"]) == ("0", "0")
+
+
 def test_deposit_history_is_independent_of_prices_and_excludes_non_deposits():
     state = empty()
     def run(command, payload):
@@ -138,7 +177,8 @@ def test_deposit_history_is_independent_of_prices_and_excludes_non_deposits():
     run("withdraw", {"account": account, "currency": "SGD", "amount": "20", "date": "2026-01-02"})
     deposits = build_portfolio_deposit_history(state, {}, date(2026, 1, 2))
     assert deposits == [{"account": account, "date": "2026-01-01", "amount_sgd": "5000",
-                         "missing_fx_count": 0}]
+                         "missing_fx_count": 0, "stale_fx_count": 0,
+                         "stale_fx_last_success_at": None}]
 
 
 def test_deposit_projection_keeps_known_contributions_and_counts_missing_fx():
@@ -150,7 +190,8 @@ def test_deposit_projection_keeps_known_contributions_and_counts_missing_fx():
     run("deposit", {"account": account, "currency": "USD", "amount": "10", "date": "2026-01-01"})
     deposits = build_portfolio_deposit_history(state, {}, date(2026, 1, 2))
     assert deposits == [{"account": account, "date": "2026-01-01", "amount_sgd": "5",
-                         "missing_fx_count": 1}]
+                         "missing_fx_count": 1, "stale_fx_count": 0,
+                         "stale_fx_last_success_at": None}]
 
 
 def test_provider_schedule_backs_off_after_failure():
